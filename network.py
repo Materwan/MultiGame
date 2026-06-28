@@ -4,18 +4,20 @@ Ce module fournit une implémentation de réseau hybride combinant:
     - Un serveur TCP pour la connexion durable au client
     - Une diffusion UDP pour la découverte automatique du client sur le réseau local
 
-Il utilise un système de double tampon (back/front) avec détection de saleté
-(`dirty`) pour synchroniser les états entre les boucles de jeu et le réseau,
-tout en maintenant des performances O(1) lors des mises à jour.
+Il utilise un registre de clients (name -> writer) côté serveur, ce qui permet
+d'envoyer des données ciblées à un client spécifique via send_to(), ou à tous
+via broadcast(). Les messages entrants sont placés dans une queue de tuples
+(sender_name, data) que Server consomme dans sa boucle de jeu.
 
 """
 
 import asyncio
+import queue
 import socket
 import threading
 import json
 import time
-from typing import Dict, Any, Optional
+from typing import Callable, Dict, Any, Optional, Tuple
 
 
 def dict_to_bytes(data: Dict) -> bytes:
@@ -34,22 +36,21 @@ class RttTracker:
     """Suit le round-trip time moyen sur une fenêtre glissante."""
 
     def __init__(self, window: int = 20):
-        import time
-
-        self._time = time
         self._samples: list = []
         self._window = window
         self._t0: Optional[float] = None
         self.average_ms: float = 0.0
+        self.last_ms: Optional[float] = None
 
     def start(self) -> float:
-        self._t0 = self._time.perf_counter()
+        self._t0 = time.perf_counter()
         return self._t0
 
     def stop(self):
         if self._t0 is None:
             return
-        elapsed = (self._time.perf_counter() - self._t0) * 1000
+        elapsed = (time.perf_counter() - self._t0) * 1000
+        self.last_ms = elapsed
         self._samples.append(elapsed)
         if len(self._samples) > self._window:
             self._samples.pop(0)
@@ -58,97 +59,115 @@ class RttTracker:
 
 
 class ServerNetwork:
-    """Classe représentant un serveur TCP pour la communication avec les clients."""
+    """Serveur TCP multi-clients.
+
+    Chaque client connecté est enregistré dans `_clients` (name -> writer).
+    Les messages entrants sont poussés dans `incoming_queue` sous la forme de
+    tuples (sender_name, data) — la logique métier reste entièrement dans Server.
+
+    API publique
+    ------------
+    send_to(name, data)   — envoie data au client `name` (thread-safe)
+    broadcast(data)       — envoie data à tous les clients connectés (thread-safe)
+    incoming_queue        — queue.Queue[(str, dict)] à consommer dans Server.update()
+    connected_names()     — retourne la liste des noms actuellement connectés
+    """
 
     def __init__(
-        self, host: str, port: int, on_guest_connect: Optional[callable] = None
+        self,
+        host: str,
+        port: int,
+        on_guest_connect: Optional[Callable[[Dict[str, Any]], Dict[str, Any]]] = None,
+        on_guest_disconnect: Optional[Callable[[str], None]] = None,
     ):
         self.host = host
         self.port = port
         self.on_guest_connect = on_guest_connect
+        self.on_guest_disconnect = on_guest_disconnect
 
+        # File de messages entrants : tuples (sender_name, data)
+        self.incoming_queue: queue.Queue[Tuple[str, Dict[str, Any]]] = queue.Queue()
+
+        # Registre des clients connectés (protégé par _lock)
+        self._clients: Dict[str, asyncio.StreamWriter] = {}
         self._lock = threading.Lock()
+
         self._stop_event = threading.Event()
-
-        self._outgoing_back: Dict[str, Any] = {}
-        self._outgoing_front: Dict[str, Any] = {}
-        self._outgoing_dirty = False
-
-        self._incoming_back: Dict[str, Any] = {}
-        self._incoming_front: Dict[str, Any] = {}
-        self._incoming_dirty = False
-
-        # Attributs d'état correctement initialisés
-        self._guest_rtt_ms: Optional[float] = None
-        self._guest_ready: bool = False
-        self._guest_disconnected: bool = False
-        self._pending_reset: Optional[Dict[str, Any]] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._server: Optional[asyncio.AbstractServer] = None
 
         self._tcp_thread = threading.Thread(target=self._run_tcp, daemon=True)
 
-    def close(self):
-        """Signale l'arrêt propre des threads réseau."""
-        self._stop_event.set()
+    # ------------------------------------------------------------------
+    # API publique — thread-safe, appelable depuis Server (thread PyGame)
+    # ------------------------------------------------------------------
 
-    def update(self, game_state: Dict[str, Any]) -> Dict[str, Any]:
-        """Appelé par le game loop à 60 FPS — O(1), juste un swap de référence."""
+    def send_to(self, name: str, data: Dict[str, Any]):
+        """Envoie `data` au client identifié par `name`. Thread-safe."""
         with self._lock:
-            self._outgoing_back = game_state
-            self._outgoing_dirty = True
+            writer = self._clients.get(name)
+        if writer is None or self._loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(self._async_write(writer, data), self._loop)
 
-            if self._incoming_dirty:
-                self._incoming_front, self._incoming_back = (
-                    self._incoming_back,
-                    self._incoming_front,
-                )
-                self._incoming_dirty = False
+    def broadcast(self, data: Dict[str, Any], exclude: Optional[str] = None):
+        """Envoie `data` à tous les clients connectés. Thread-safe.
 
-                rtt = self._incoming_front.get("rtt_ms")
-                if rtt is not None:
-                    self._guest_rtt_ms = rtt
-
-                return self._incoming_front
-
-            return {}
-
-    def _get_outgoing(self) -> Dict[str, Any]:
+        Parameters
+        ----------
+        exclude : str, optional
+            Nom du client à exclure de la diffusion (ex: l'émetteur).
+        """
         with self._lock:
-            if self._pending_reset is not None:
-                packet = self._pending_reset
-                self._pending_reset = None
-                return packet
+            targets = {
+                name: writer
+                for name, writer in self._clients.items()
+                if name != exclude
+            }
+        if self._loop is None:
+            return
+        for writer in targets.values():
+            asyncio.run_coroutine_threadsafe(
+                self._async_write(writer, data), self._loop
+            )
 
-            if self._outgoing_dirty:
-                self._outgoing_front, self._outgoing_back = (
-                    self._outgoing_back,
-                    self._outgoing_front,
-                )
-                self._outgoing_dirty = False
-            return self._outgoing_front
-
-    def _set_incoming(self, data: Dict[str, Any]):
-        """CORRECTION : méthode dupliquée fusionnée en une seule."""
+    def connected_names(self):
+        """Retourne la liste des noms de clients actuellement connectés."""
         with self._lock:
-            self._incoming_back = data
-            self._incoming_dirty = True
-
-            if data.get("ready"):
-                self._guest_ready = True
+            return list(self._clients.keys())
 
     def start(self):
-        """Démarre le serveur et accepte les connexions des clients."""
+        """Démarre le serveur TCP dans son thread dédié."""
         self._tcp_thread.start()
 
-    def stop(self):
-        """Arrête proprement le serveur."""
+    def close(self):
+        """Signale l'arrêt propre du serveur."""
         self._stop_event.set()
+        if self._loop and self._server:
+            self._loop.call_soon_threadsafe(self._server.close)
+
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
+
+    async def _async_write(self, writer: asyncio.StreamWriter, data: Dict[str, Any]):
+        """Coroutine d'écriture — s'exécute dans la boucle asyncio du serveur."""
+        try:
+            writer.write(dict_to_bytes(data))
+            await writer.drain()
+        except (ConnectionResetError, BrokenPipeError):
+            pass  # Le client s'est déconnecté, _handle_client s'en chargera
 
     def _run_tcp(self):
-        print("[Server] Starting TCP server...")
-        asyncio.run(self._tcp_server())
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
+        try:
+            self._loop.run_until_complete(self._tcp_server())
+        finally:
+            self._loop.close()
 
     async def _tcp_server(self):
+        print("[Server] Starting TCP server...")
         self._server = await asyncio.start_server(
             self._handle_client,
             host=self.host,
@@ -167,245 +186,246 @@ class ServerNetwork:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ):
-        print(
-            f"\n[Server] New client trying to connect from {writer.get_extra_info('peername')}"
-        )
+        peer = writer.get_extra_info("peername")
+        print(f"\n[Server] New client connecting from {peer}")
 
-        raw = await asyncio.wait_for(reader.readline(), timeout=100.0)
-        if not raw:
-            print(f"\n[Server] New client disconnected")
-            self._guest_disconnected = True
+        # --- Handshake initial ---
+        try:
+            raw = await asyncio.wait_for(reader.readline(), timeout=10.0)
+        except asyncio.TimeoutError:
+            print("[Server] Handshake timeout — closing connection")
             writer.close()
-            await writer.wait_closed()
+            return
+
+        if not raw:
+            print("[Server] Client disconnected before handshake")
+            writer.close()
             return
 
         data = bytes_to_dict(raw)
-        player_name = data.get("name", "No name")
+        if data is None:
+            writer.close()
+            return
 
+        player_name = data.get("name", f"Unknown_{peer}")
+
+        # Appel du callback de connexion (ex: adjacent_list.add_user)
         if self.on_guest_connect is not None:
-            initial_state = self.on_guest_connect(data)
+            initial_response = self.on_guest_connect(data)
         else:
-            initial_state = self._get_outgoing()
+            initial_response = {"type": "handshake"}
 
-        writer.write(dict_to_bytes(initial_state))
-        await writer.drain()
+        # Enregistrement du client dans le registre
+        with self._lock:
+            self._clients[player_name] = writer
 
-        print(
-            f"[Server] Client {player_name} connected from {writer.get_extra_info('peername')}"
-        )
+        # Envoi de la réponse initiale
+        await self._async_write(writer, initial_response)
+        print(f"[Server] Client '{player_name}' connected from {peer}")
 
+        # --- Boucle de réception ---
         try:
             while not self._stop_event.is_set():
-                raw = await asyncio.wait_for(reader.readline(), timeout=100.0)
+                try:
+                    raw = await asyncio.wait_for(reader.readline(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    # Timeout normal — continue la boucle pour vérifier _stop_event
+                    continue
+
                 if not raw:
-                    print(f"\n[Server] Client {player_name} disconnected")
-                    self._guest_disconnected = True
+                    print(f"[Server] Client '{player_name}' disconnected")
                     break
 
-                data = bytes_to_dict(raw)
-                if data is None or data.get("close"):
-                    print(f"\n[Server] Client {player_name} closed the connection")
-                    self._guest_disconnected = True
+                incoming = bytes_to_dict(raw)
+                if incoming is None or incoming.get("close"):
+                    print(f"[Server] Client '{player_name}' closed the connection")
                     break
 
-                self._set_incoming(data)
+                if data.get("type") == "close":
+                    break
 
-                writer.write(dict_to_bytes(self._get_outgoing()))
-                await writer.drain()
+                # Pousse le message dans la queue avec l'identité de l'émetteur
+                self.incoming_queue.put((player_name, incoming))
 
-        except asyncio.TimeoutError:
-            print(f"\n[Server] Timeout — client {player_name} unreachable")
-            self._guest_disconnected = True
         except ConnectionResetError:
-            print(f"\n[Server] Connection reset by client {player_name}")
-            self._guest_disconnected = True
+            print(f"[Server] Connection reset by '{player_name}'")
         finally:
+            with self._lock:
+                self._clients.pop(player_name, None)
             writer.close()
-            await writer.wait_closed()  # CORRECTION : attendre la fermeture propre
-            print(f"[Server] Connection closed with client {player_name}")
-            # CORRECTION : on ne ferme plus self._server ici pour permettre
-            # à d'autres clients de se connecter après déconnexion
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass  # Connexion déjà fermée ou erreur réseau
+            print(f"[Server] Connection closed with '{player_name}'")
+            if self.on_guest_disconnect is not None:
+                self.on_guest_disconnect(player_name)
 
 
 class ClientNetwork:
-    """Classe représentant un client TCP pour la communication avec le serveur."""
+    """Client TCP symétrique à ServerNetwork.
+
+    Les messages entrants (depuis le serveur) sont poussés dans `incoming_queue`
+    sous forme de dicts bruts — Game les consomme dans sa propre boucle via
+    `_handle_message`. L'envoi vers le serveur se fait via `send(data)`.
+
+    API publique
+    ------------
+    send(data)          — envoie data au serveur (thread-safe)
+    incoming_queue      — queue.Queue[dict] à consommer dans Game._run()
+    initial_state       — dict reçu lors du handshake (voisins, etc.)
+    connected           — bool, True si la connexion est établie
+    rtt_tracker         — RttTracker pour mesurer la latence
+    """
 
     def __init__(self, host: str, port: int, name: str):
         self.host = host
         self.port = port
         self.name = name
 
+        # File de messages entrants depuis le serveur
+        self.incoming_queue: queue.Queue[Dict[str, Any]] = queue.Queue()
+
+        self.initial_state: Dict[str, Any] = {}
+        self.connected: bool = False
+        self.rtt_tracker = RttTracker()
+
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
-
-        self._outgoing_back: Dict[str, Any] = {}
-        self._outgoing_front: Dict[str, Any] = {}
-        self._outgoing_dirty = False
-
-        self._incoming_back: Dict[str, Any] = {}
-        self._incoming_front: Dict[str, Any] = {}
-        self._incoming_dirty = False
-
-        self._initial_state: Dict[str, Any] = {}
-
-        # Attributs d'état correctement initialisés
-        self._connected: bool = False
-        self._loaded: bool = False
-        self._is_ready: bool = False
-        self._map_data: Optional[Dict[str, Any]] = None
-        self._reader: Optional[asyncio.StreamReader] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._writer: Optional[asyncio.StreamWriter] = None
-        self._close_sent = threading.Event()
 
-        self.rtt_tracker = RttTracker()  # CORRECTION : initialisé ici
+        self._tcp_thread = threading.Thread(target=self._run_tcp, daemon=True)
 
-        self._tcp_thread = threading.Thread(target=self._run, daemon=True)
+    # ------------------------------------------------------------------
+    # API publique — thread-safe, appelable depuis Game (thread PyGame)
+    # ------------------------------------------------------------------
+
+    def send(self, data: Dict[str, Any]):
+        """Envoie `data` au serveur. Thread-safe."""
+        with self._lock:
+            writer = self._writer
+        if writer is None or self._loop is None:
+            return
+        asyncio.run_coroutine_threadsafe(self._async_write(writer, data), self._loop)
+
+    def start(self):
+        """Démarre le thread réseau et se connecte au serveur."""
+        self._tcp_thread.start()
 
     def close(self):
         """Signale l'arrêt propre du thread réseau."""
         self._stop_event.set()
+        self.send({"type": "close"})
+        # Ne pas arrêter la boucle directement — laisser _connect() se terminer naturellement
 
-    def update(self, game_state: Dict[str, Any]) -> Dict[str, Any]:
-        """Appelé par le game loop à 60 FPS — O(1), juste un swap de référence."""
-        with self._lock:
-            game_state["rtt_ms"] = self.rtt_tracker.average_ms
+    # ------------------------------------------------------------------
+    # Internals
+    # ------------------------------------------------------------------
 
-            self._outgoing_back = game_state
-            self._outgoing_dirty = True
+    async def _async_write(self, writer: asyncio.StreamWriter, data: Dict[str, Any]):
+        try:
+            writer.write(dict_to_bytes(data))
+            await writer.drain()
+        except (ConnectionResetError, BrokenPipeError):
+            pass
 
-            if self._incoming_dirty:
-                self._incoming_front, self._incoming_back = (
-                    self._incoming_back,
-                    self._incoming_front,
-                )
-                self._incoming_dirty = False
-                return self._incoming_front
-
-            return {}
-
-    def _get_outgoing(self) -> Dict[str, Any]:
-        """CORRECTION : méthode dupliquée fusionnée en une seule."""
-        with self._lock:
-            if self._outgoing_dirty:
-                self._outgoing_front, self._outgoing_back = (
-                    self._outgoing_back,
-                    self._outgoing_front,
-                )
-                self._outgoing_dirty = False
-
-            if self._is_ready:
-                packet = dict(self._outgoing_front)
-                packet["ready"] = True
-                self._is_ready = False
-                return packet
-
-            return self._outgoing_front
-
-    def _set_incoming(self, data: Dict[str, Any]):
-        with self._lock:
-            self._incoming_back = data
-            self._incoming_dirty = True
-
-    def _set_initial_state(self, data: Dict[str, Any]):
-        """Définit l'état initial reçu du serveur."""
-        with self._lock:
-            self._initial_state = data
-
-    def get_initial_state(self) -> Dict[str, Any]:
-        """Retourne l'état initial reçu du serveur."""
-        with self._lock:
-            return self._initial_state
-
-    def start(self):
-        """Démarre le client et se connecte au serveur."""
-        self._tcp_thread.start()
-
-    def stop(self):
-        """Arrête proprement le client."""
-        self._stop_event.set()
-
-    def _run(self):
+    def _run_tcp(self):
+        self._loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._loop)
         print(f"[Guest] Attempting connection to {self.host}:{self.port}...")
-        asyncio.run(self._initialize())
-
-    async def _initialize(self):
-        """CORRECTION : appelle _connect avant _handle_host."""
-        if not self._stop_event.is_set():
-            await self._connect()
-        if self._connected and not self._stop_event.is_set():
-            await self._handle_host()
+        try:
+            self._loop.run_until_complete(self._connect())
+        except RuntimeError:
+            # Event loop fermée ou interrompue proprement
+            pass
+        finally:
+            try:
+                self._loop.close()
+            except Exception:
+                pass
 
     async def _connect(self):
         try:
-            self._reader, self._writer = await asyncio.open_connection(
-                self.host, self.port
-            )
-
-            self._writer.write(
-                dict_to_bytes({"close": False, "type": "handshake", "name": self.name})
-            )
-            await self._writer.drain()
-
-            # Réception du premier paquet (contient la map + état initial)
-            raw = await self._reader.readline()
-            data = bytes_to_dict(raw)
-            if data is None or data.get("close"):
-                self._stop_event.set()
-                return
-
-            self._set_initial_state(data)
-
-            self._connected = True
-            print(f"[Guest] Connected to {self.host}:{self.port}")
-
+            reader, writer = await asyncio.open_connection(self.host, self.port)
         except ConnectionRefusedError:
             print(f"[Guest] Connection refused — {self.host}:{self.port}")
-            self._stop_event.set()
+            return
         except OSError as e:
             print(f"[Guest] Network error: {e}")
-            self._stop_event.set()
-        finally:
-            self._loaded = True
+            return
 
-    async def _handle_host(self):
+        with self._lock:
+            self._writer = writer
+
+        # Handshake
+        await self._async_write(writer, {"type": "handshake", "name": self.name})
+
+        raw = await reader.readline()
+        data = bytes_to_dict(raw)
+        if data is None:
+            print("[Guest] Invalid handshake response")
+            writer.close()
+            return
+
+        self.initial_state = data
+        self.connected = True
+        print(f"[Guest] Connected to {self.host}:{self.port}")
+        print(f"[Guest] Initial state: {data}")
+
+        await self._receive_loop(reader, writer)
+
+    async def _receive_loop(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ):
+        """Écoute en continu les messages du serveur et les pousse dans incoming_queue."""
         try:
             while not self._stop_event.is_set():
-                snapshot = self._get_outgoing()
-                self._writer.write(dict_to_bytes(snapshot))
-                await self._writer.drain()
-                if snapshot.get("close"):
-                    self._close_sent.set()
+                self.rtt_tracker.start()
+                try:
+                    raw = await asyncio.wait_for(reader.readline(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    # Timeout normal — continue la boucle pour vérifier _stop_event
+                    continue
 
-                self.rtt_tracker.start()  # CORRECTION : horodatage avant attente
-
-                raw = await asyncio.wait_for(self._reader.readline(), timeout=100.0)
                 if not raw:
-                    print("[Guest] Host closed the connection")
-                    self._stop_event.set()
+                    print("[Guest] Server closed the connection")
                     break
 
-                self.rtt_tracker.stop()  # CORRECTION : calcul du RTT après réponse
+                self.rtt_tracker.stop()
 
                 data = bytes_to_dict(raw)
                 if data is None or data.get("close"):
-                    print("[Guest] Host closed the connection")
-                    self._stop_event.set()
+                    print("[Guest] Server closed the connection")
                     break
 
-                if data.get("reset"):
-                    with self._lock:
-                        self._map_data = data.get("map")
+                if data.get("type") == "ping":
+                    # Répond immédiatement au ping serveur au niveau du réseau
+                    self.send(
+                        {
+                            "type": "pong",
+                            "timestamp": data.get("timestamp", time.time()),
+                        }
+                    )
+                    continue
 
-                self._set_incoming(data)
+                if data.get("type") == "close":
+                    self.close()
+                    break
 
-        except asyncio.TimeoutError:
-            print("[Guest] Timeout — host unreachable")
-            self._stop_event.set()
+                self.incoming_queue.put(data)
+
         except ConnectionResetError:
-            print("[Guest] Connection reset by host")
-            self._stop_event.set()
+            print("[Guest] Connection reset by server")
         finally:
-            self._writer.close()
-            await self._writer.wait_closed()  # CORRECTION : fermeture propre
-            self._connected = False
-            print("[Guest] Connexion fermée")
+            with self._lock:
+                self._writer = None
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass  # Connexion déjà fermée ou erreur réseau
+            self.connected = False
+            print("[Guest] Connection closed")

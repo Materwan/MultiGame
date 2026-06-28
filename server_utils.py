@@ -8,6 +8,14 @@ class AdjacentList:
         self.user_name: List[str] = []
         self.adjacent_list: List[List[int]] = []
 
+    def get_neighbors(self, user_name: str) -> List[str]:
+        try:
+            user_index = self.user_name.index(user_name)
+            neighbor_indices = self.adjacent_list[user_index]
+            return [self.user_name[i] for i in neighbor_indices]
+        except ValueError:
+            return []  # L'utilisateur n'existe pas dans la liste
+
     def add_user(self, new_user_data: Dict[str, Any]):
         new_user_name = new_user_data.get("name", f"User {len(self.user_name)}")
         self.user_name.append(new_user_name)
@@ -24,7 +32,7 @@ class AdjacentList:
 
         return {
             "type": "handshake",
-            "neighbors": [self.user_name[i] for i in self.adjacent_list[new_index]],
+            "neighbors": self.get_neighbors(new_user_name),
         }
 
     def remove_user(self, user_name: str):

@@ -115,6 +115,9 @@ game = Manager(DEFAULTSCREEN)
 try:
     game.run()
 except KeyboardInterrupt:
+    game.states[
+        "Game"
+    ].close_connexion()  # Fermer la connexion lorsque le jeu se termine
     pygame.quit()
 
 pygame.quit()
