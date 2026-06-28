@@ -7,8 +7,9 @@ pygame.init()
 pygame.display.init()
 pygame.mixer.init()
 
-from utils import *
-from menu import Principal_Menu
+from client_utils import *
+from menu import PrincipalMenu, SettingsMenu
+from game import Game
 
 
 class Manager(BaseManager):
@@ -30,9 +31,24 @@ class Manager(BaseManager):
 
         # -- State Manager --
         self.states: Dict[str, DefaultState] = {
-            "Principal_Menu": Principal_Menu(self.screen, self)
+            "Principal_Menu": PrincipalMenu(self.screen, self),
+            "Settings_Menu": SettingsMenu(self.screen, self),
+            "Game": Game(self.screen, self),
         }
-        self.state = self.states["Principal_Menu"]
+        self.state = self.states.get("Principal_Menu", PrincipalMenu(self.screen, self))
+
+    def change_state(self, new_state_name: str):
+        """Change l'état actuel du jeu."""
+        if new_state_name in self.states:
+            if new_state_name == "Game":
+                game_state = self.states["Game"]
+                if isinstance(game_state, Game):
+                    game_state.start()
+            self.state = self.states[new_state_name]
+        else:
+            raise ValueError(
+                f"L'état '{new_state_name}' n'existe pas dans le gestionnaire d'états."
+            )
 
     def resize_screen(
         self, new_size: Tuple[int, int] | List[int] | None = FULLSCREEN_SIZE
@@ -86,7 +102,11 @@ class Manager(BaseManager):
             self.state.update()
             self.state.display()
 
-            self.clock.tick(60)
+            self.clock.tick(30)
+
+        self.states[
+            "Game"
+        ].close_connexion()  # Fermer la connexion lorsque le jeu se termine
 
 
 game = Manager(DEFAULTSCREEN)

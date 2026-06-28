@@ -1,20 +1,27 @@
 import os
 import sys
+import random
 from typing import List, Tuple, Dict
 from abc import ABC, abstractmethod
 
 import pygame
-from pygame._sdl2.video import Window
 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
+GRAY = (32, 33, 35)
 
-FULLSCREEN_SIZE = pygame.display.Info().current_w, pygame.display.Info().current_h
-DEFAULTSCREENSIZE = FULLSCREEN_SIZE[0] // 2, FULLSCREEN_SIZE[1] // 2
+FULLSCREEN_SIZE = (-1, -1)
 
-DEFAULTSCREEN = pygame.display.set_mode(DEFAULTSCREENSIZE, pygame.RESIZABLE)
+if __name__ != "__main__":
 
-WINDOW = Window.from_display_module()
+    from pygame._sdl2.video import Window
+
+    FULLSCREEN_SIZE = pygame.display.Info().current_w, pygame.display.Info().current_h
+    DEFAULTSCREENSIZE = FULLSCREEN_SIZE[0] // 2, FULLSCREEN_SIZE[1] // 2
+
+    DEFAULTSCREEN = pygame.display.set_mode(DEFAULTSCREENSIZE, pygame.RESIZABLE)
+
+    WINDOW = Window.from_display_module()
 
 
 class BaseManager:
@@ -63,7 +70,5 @@ class DefaultState(ABC):
 
     def display(self):
         """Affiche les éléments correspondant à l'interface."""
-
-        self.screen.fill(BLACK)
 
         pygame.display.flip()
