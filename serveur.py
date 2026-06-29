@@ -2,6 +2,9 @@ import threading
 import socket
 import random
 import time
+from typing import List
+
+import pygame
 
 from network import ServerNetwork
 from server_utils import AdjacentList
@@ -10,20 +13,20 @@ random.seed(42)
 
 
 class Server:
-    """Serveur de jeu.
+    """Serveur de jeu."""
 
-    Responsabilités
-    ---------------
-    - Maintenir l'état partagé du jeu (adjacent_list, ressources, etc.)
-    - Consommer incoming_queue pour traiter chaque message avec son émetteur
-    - Répondre via server.send_to() ou server.broadcast()
-
-    ServerNetwork n'est qu'un transport : il ne connaît pas la logique métier.
-    """
-
-    def __init__(self, host: str, port: int):
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        visual: "Visual",
+    ):
         self.adjacent_list = AdjacentList()
         self.adjacent_list._generate_random_users(5)
+
+        self.visual = visual
+
+        self.running = True
 
         self.server = ServerNetwork(
             host,
@@ -38,12 +41,10 @@ class Server:
     # ------------------------------------------------------------------
 
     def _on_connect(self, data: dict) -> dict:
-        """Appelé à la connexion d'un nouveau client — retourne le handshake."""
         response = self.adjacent_list.add_user(data)
         name = data.get("name", "?")
         print(f"[Game] '{name}' joined — neighbors: {response.get('neighbors', [])}")
 
-        # Notifie les voisins existants qu'un nouveau joueur est apparu
         for neighbor_name in response.get("neighbors", []):
             self.server.send_to(
                 neighbor_name,
@@ -56,11 +57,9 @@ class Server:
         return response
 
     def _on_disconnect(self, name: str):
-        """Appelé à la déconnexion d'un client."""
         print(f"[Game] '{name}' left the game")
         self.adjacent_list.remove_user(name)
 
-        # Notifie les autres joueurs connectés
         self.server.broadcast(
             {
                 "type": "player_left",
@@ -73,11 +72,6 @@ class Server:
     # ------------------------------------------------------------------
 
     def _handle_message(self, sender: str, data: dict):
-        """Traite un message entrant et répond au client concerné.
-
-        C'est ici que toute la logique métier prend place : la fonction a
-        accès à `self.adjacent_list`, `self.server.send_to()`, etc.
-        """
         msg_type = data.get("type")
 
         if msg_type == "attack":
@@ -86,8 +80,19 @@ class Server:
             self.server.send_to(sender, response)
 
         elif msg_type == "get_state":
-            # Envoie l'état personnalisé du joueur (ses voisins, ses ressources…)
             self.server.send_to(sender, self._build_player_state(sender))
+
+        elif msg_type == "get_node_resources":
+            target = data.get("target")
+            res = self.adjacent_list.get_resources(target) if target else {}
+            self.server.send_to(
+                sender,
+                {
+                    "type": "node_resources",
+                    "name": target,
+                    "resources": res,
+                },
+            )
 
         elif msg_type == "ping":
             self.server.send_to(sender, {"type": "pong"})
@@ -101,11 +106,9 @@ class Server:
                 print(f"[Server] Received pong from {sender}")
 
         else:
-            # Echo par défaut — utile pendant le développement
             self.server.send_to(sender, {"type": "echo", "received": data})
 
     def _resolve_attack(self, attacker: str, target: str) -> dict:
-        """Exemple de logique métier avec accès à adjacent_list."""
         names = self.adjacent_list.user_name
         if target not in names:
             return {
@@ -117,7 +120,6 @@ class Server:
         attacker_idx = names.index(attacker) if attacker in names else -1
         target_idx = names.index(target)
 
-        # Vérifie que attacker et target sont voisins dans le graphe
         are_neighbors = (
             attacker_idx >= 0
             and target_idx in self.adjacent_list.adjacent_list[attacker_idx]
@@ -126,13 +128,11 @@ class Server:
         result = {"type": "attack_result", "target": target, "success": are_neighbors}
 
         if are_neighbors:
-            # Notifie la cible qu'elle est attaquée
             self.server.send_to(target, {"type": "under_attack", "from": attacker})
 
         return result
 
     def _build_player_state(self, name: str) -> dict:
-        """Construit l'état personnalisé d'un joueur depuis adjacent_list."""
         names = self.adjacent_list.user_name
         if name not in names:
             return {"type": "state", "neighbors": [], "all_players": []}
@@ -140,22 +140,30 @@ class Server:
         idx = names.index(name)
         neighbors = [names[i] for i in self.adjacent_list.adjacent_list[idx]]
 
+        # ← NEW : on inclut les ressources de TOUS les joueurs connus
+        all_resources = {n: self.adjacent_list.get_resources(n) for n in names}
+
         return {
             "type": "state",
             "neighbors": neighbors,
             "all_players": list(names),
             "connected": self.server.connected_names(),
+            "all_resources": all_resources,  # ← NEW
+            "resources": self.adjacent_list.get_resources(name),
         }
 
     def _run(self):
-        """Boucle principale : consomme la queue de messages entrants."""
-        while True:
+        while self.running:
             try:
-                # Bloque 50 ms au maximum pour rester réactif à un éventuel arrêt
                 sender, data = self.server.incoming_queue.get(timeout=0.05)
                 self._handle_message(sender, data)
             except Exception:
-                pass  # Queue vide ou timeout — on reboucle
+                pass
+
+    def close(self):
+
+        self.running = False
+        self.server.close()
 
     # ------------------------------------------------------------------
     # Démarrage
@@ -167,27 +175,39 @@ class Server:
         self._input_loop()
 
     def _input_loop(self):
-        while True:
-            command = input().strip().split(" ")
-            if command[0] == "exit":
-                answer = input("\nAre you sure? (y/n): ")
+
+        def _handle_close(command: List[str]):
+            if command[0] == "close":
+                try:
+                    answer = input("\nAre you sure? (y/n): ")
+                except EOFError:
+                    self.running = False
+                except KeyboardInterrupt:
+                    self.running = False
+
                 if answer in ("y", "yes"):
-                    self.server.close()
-                    break
-                print("Exit cancelled.")
-            elif command[0] == "get":
+                    self.close()
+                    self.running = False
+                print("Closing cancelled.")
+
+        def _handle_get(command: List[str]):
+            if command[0] == "get":
                 if len(command) > 1:
                     if command[1] == "graph":
                         self.adjacent_list.display_matrix()
                     elif command[1] == "connected":
                         print(f"\nConnected: {self.server.connected_names()}")
+                    else:
+                        print("\nUsage: get graph | connected")
                 else:
-                    print("Usage: get graph | connected")
-            elif command[0] == "connected":
-                print(f"\nConnected: {self.server.connected_names()}")
-            elif command[0] == "help":
-                print("\nCommands: 'get users', 'connected', 'exit'")
-            elif command[0] == "ping":
+                    print("\nUsage: get graph | connected")
+
+        def _handle_help(command: List[str]):
+            if command[0] == "help":
+                print("\nCommands: 'get', 'connected', 'exit'")
+
+        def _handle_ping(command: List[str]):
+            if command[0] == "ping":
                 if len(command) > 1:
                     payload = {"type": "ping", "timestamp": time.time()}
                     if command[1] in self.server.connected_names():
@@ -200,17 +220,118 @@ class Server:
                         print(f"\n'{command[1]}' is not a connected client")
                 else:
                     print("Usage: ping <player_name> | all")
-            else:
+
+        def _handle_visual(command: List[str]):
+            if command[0] == "visual":
+                if self.visual.running:
+                    print("\nVisual interface already running.")
+                else:
+                    self.visual.start_visual_event.set()
+                    print("\nLaunched visual mode.")
+
+        def _handle_exit(command: List[str]):
+            if command[0] == "exit":
+                if not self.visual.running:
+                    print("\nNo visual interface already running.")
+                else:
+                    self.visual.running = False
+
+        def _handle_unkown(command: List[str]):
+            if command[0] not in ["close", "get", "help", "ping", "visual", "exit"]:
                 print("Unknown command. Try 'help'.")
+
+        while self.running:
+            try:
+                command = input().strip().split(" ")
+            except EOFError:
+                self.running = False
+            except KeyboardInterrupt:
+                self.running = False
+
+            _handle_close(command)
+            _handle_get(command)
+            _handle_help(command)
+            _handle_ping(command)
+            _handle_visual(command)
+            _handle_exit(command)
+            _handle_unkown(command)
+
+
+class Visual:
+
+    def __init__(self):
+
+        self.start_visual_event = threading.Event()
+
+        self.running = False
+        self.clock = pygame.time.Clock()
+
+    def event(self):
+        """Gére les évenements : interactions du joueur avec l'interface."""
+
+        events = pygame.event.get()
+
+        for event in events:
+
+            if event.type == pygame.QUIT:
+                self.running = False
+
+    def update(self):
+        """Met à jour les éléments de l'interface."""
+
+    def display(self):
+        """Affiche les éléments correspondant à l'interface."""
+
+        self.screen.fill((0, 0, 0))
+
+        pygame.display.flip()
+
+    def run(self, server_thread: threading.Thread):
+
+        while server_thread.is_alive():
+
+            if self.start_visual_event.is_set():
+                self.start_visual_event.clear()
+                self.running = True
+
+                pygame.init()
+                pygame.display.init()
+
+                self.screen = pygame.display.set_mode((920, 580))
+
+                while self.running and server_thread.is_alive():
+
+                    self.event()
+                    self.update()
+                    self.display()
+
+                    self.clock.tick(30)
+
+                pygame.display.quit()
+                pygame.quit()
+
+                print("\nVisual mode closed.")
+
+            time.sleep(0.1)
 
 
 if __name__ == "__main__":
     host = socket.gethostbyname(socket.gethostname())
     port = 5555
 
+    visual = Visual()
+
+    server = Server(host, port, visual)
+
+    server_thread = threading.Thread(target=server.start)
+
     try:
-        Server(host, port).start()
+        server_thread.start()
+        visual.run(server_thread)
     except KeyboardInterrupt:
-        print("\n[Host] Server shutdown...")
+        server.close()
+        while server.server._tcp_thread.is_alive():
+            time.sleep(0.05)
+        print("\n[Server] Server shutdown...")
     else:
-        print("\n[Host] Server shutdown...")
+        print("\n[Server] Server shutdown...")

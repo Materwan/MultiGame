@@ -144,6 +144,7 @@ class ServerNetwork:
         """Signale l'arrêt propre du serveur."""
         self._stop_event.set()
         if self._loop and self._server:
+            self.broadcast({"type": "close"})
             self._loop.call_soon_threadsafe(self._server.close)
 
     # ------------------------------------------------------------------
