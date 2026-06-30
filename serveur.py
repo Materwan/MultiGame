@@ -2,12 +2,13 @@ import threading
 import socket
 import random
 import time
-from typing import List
+from typing import List, Dict, Any
 
 import pygame
 
 from network import ServerNetwork
 from server_utils import AdjacentList
+from interface import Interface
 
 random.seed(42)
 
@@ -226,7 +227,7 @@ class Server:
                 if self.visual.running:
                     print("\nVisual interface already running.")
                 else:
-                    self.visual.start_visual_event.set()
+                    self.visual.trigger()
                     print("\nLaunched visual mode.")
 
         def _handle_exit(command: List[str]):
@@ -234,7 +235,7 @@ class Server:
                 if not self.visual.running:
                     print("\nNo visual interface already running.")
                 else:
-                    self.visual.running = False
+                    self.visual.end()
 
         def _handle_unkown(command: List[str]):
             if command[0] not in ["close", "get", "help", "ping", "visual", "exit"]:
@@ -265,6 +266,20 @@ class Visual:
 
         self.running = False
         self.clock = pygame.time.Clock()
+
+        self._data: Dict[str, Any] = {}
+
+    def trigger(self):
+
+        self.running = False
+        self.start_visual_event.set()
+
+    def end(self):
+
+        self.running = False
+
+    def update_data(self, data: Dict[str, Any]):
+        self._data = data
 
     def event(self):
         """Gére les évenements : interactions du joueur avec l'interface."""

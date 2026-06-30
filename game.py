@@ -11,7 +11,7 @@ from graph import GraphView
 
 
 class Game(DefaultState):
-    """État de jeu principal."""
+    """Gère l'état de jeu principal et la communication avec le serveur."""
 
     def __init__(
         self,
@@ -21,6 +21,7 @@ class Game(DefaultState):
         port: int = 5555,
         name: str = "Materwan",
     ):
+        """Initialise la vue de jeu, la connexion réseau et les données de graphe."""
         super().__init__(screen, manager)
 
         self.host = host
@@ -43,6 +44,7 @@ class Game(DefaultState):
     # ------------------------------------------------------------------
 
     def start(self):
+        """Démarre la connexion au serveur et lance la boucle de jeu."""
         self.client.start()
 
         deadline = time.time() + 3.0
@@ -57,6 +59,7 @@ class Game(DefaultState):
             print("[Game] Failed to connect to server")
 
     def close_connexion(self):
+        """Ferme proprement la connexion réseau active."""
         self.client.close()
 
     # ------------------------------------------------------------------
@@ -64,6 +67,7 @@ class Game(DefaultState):
     # ------------------------------------------------------------------
 
     def _run(self):
+        """Lit en continu les messages entrants et les transmet au gestionnaire."""
         while self.client.connected or not self.client.incoming_queue.empty():
             try:
                 data = self.client.incoming_queue.get(timeout=0.05)
@@ -72,6 +76,7 @@ class Game(DefaultState):
                 pass
 
     def _handle_message(self, data: Dict[str, Any]):
+        """Traite un message réseau reçu et met à jour l'état local."""
         msg_type = data.get("type")
 
         if msg_type == "state":
@@ -84,6 +89,7 @@ class Game(DefaultState):
                 self.all_resources.update(new_all_res)
                 if self.graph_view:
                     self.graph_view.set_all_resources(self.all_resources)
+            self._sync_graph_view()
 
         elif msg_type == "node_resources":
             node_name = data.get("name")
@@ -97,12 +103,16 @@ class Game(DefaultState):
             new_name = data.get("name")
             if new_name and new_name not in self.neighbors:
                 self.neighbors.append(new_name)
+                self._sync_graph_view()
                 print(f"[Game] New neighbor: {new_name}")
 
         elif msg_type == "player_left":
             left_name = data.get("name")
             if left_name in self.neighbors:
                 self.neighbors.remove(left_name)
+            if left_name in self.all_players:
+                self.all_players.remove(left_name)
+            self._sync_graph_view()
             print(f"[Game] Player left: {left_name}")
 
         elif msg_type == "under_attack":
@@ -128,14 +138,41 @@ class Game(DefaultState):
         else:
             print(f"[Game] Unknown message type '{msg_type}': {data}")
 
+    def _sync_graph_view(self):
+        """Met à jour la vue graphique du graphe avec les nœuds et liens courants."""
+        if not self.graph_view:
+            return
+        nodes = (
+            self.all_players or self.connected_players or self.neighbors or [self.name]
+        )
+        edges = [
+            (self.name, neighbor)
+            for neighbor in self.neighbors
+            if neighbor != self.name
+        ]
+        self.graph_view.update_graph(self.name, nodes, edges)
+
     def _apply_initial_state(self, state: Dict[str, Any]):
+        """Applique l'état initial fourni par le serveur à l'instance locale."""
         self.neighbors = state.get("neighbors", [])
+        self.all_players = state.get("all_players", self.all_players)
+        self.connected_players = state.get("connected", self.connected_players)
         self.resources = state.get("resources", {"cpu": 10, "ram": 10})  # ← NEW
-        self.graph_view = GraphView(self.screen, self.name, self.neighbors)
+        self.graph_view = GraphView(
+            self.screen,
+            self.name,
+            self.all_players or self.connected_players or self.neighbors or [self.name],
+            [
+                (self.name, neighbor)
+                for neighbor in self.neighbors
+                if neighbor != self.name
+            ],
+        )
         # Pré-charge les ressources connues dès le handshake
         if self.resources:
             self.all_resources[self.name] = self.resources
             self.graph_view.set_all_resources(self.all_resources)
+        self._sync_graph_view()
         print(f"[Game] Initial neighbors: {self.neighbors}")
         print(f"[Game] Initial resources: {self.resources}")
 
@@ -144,15 +181,19 @@ class Game(DefaultState):
     # ------------------------------------------------------------------
 
     def send(self, data: Dict[str, Any]):
+        """Envoie un payload au serveur via le client réseau."""
         self.client.send(data)
 
     def attack(self, target: str):
+        """Demande l'attaque d'une cible donnée."""
         self.send({"type": "attack", "target": target})
 
     def request_state(self):
+        """Demande une mise à jour complète de l'état au serveur."""
         self.send({"type": "get_state"})
 
     def ping(self):
+        """Envoie un message de ping pour tester la latence réseau."""
         self.send({"type": "ping"})
 
     # ------------------------------------------------------------------
@@ -160,6 +201,7 @@ class Game(DefaultState):
     # ------------------------------------------------------------------
 
     def event(self, events: List[pygame.event.Event]):
+        """Traite les événements PyGame et les routes vers les composants concernés."""
         super().event(events)
         for event in events:
             if event.type == pygame.KEYDOWN:
@@ -172,9 +214,11 @@ class Game(DefaultState):
                 self.graph_view.handle_event(event)
 
     def update(self):
+        """Met à jour l'état courant du jeu."""
         super().update()
 
     def display(self):
+        """Rafraîchit l'affichage du jeu et de la vue graphique."""
         self.screen.fill(BLACK)
         if self.graph_view is not None:
             self.graph_view.draw()
