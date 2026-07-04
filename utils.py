@@ -5,6 +5,7 @@ from datetime import datetime
 DEFAULT_CPU = 10
 DEFAULT_RAM = 10
 DEFAULT_RESOURCES = {"CPU": DEFAULT_CPU, "RAM": DEFAULT_RAM}
+DEFAULT_DEPTH_VISIBILITY = 1
 
 
 class UserStates:
@@ -16,6 +17,7 @@ class UserStates:
         self.user_names: List[str] = []
         self.adjacent_list: List[List[int]] = []
         self.resources: List[Dict[str, Any]] = []
+        self._depth_visibility: List[int] = []
 
     def get_neighbors(self, user_name: str | None = None) -> List[str]:
         """Renvoie les voisins d'un utilisateur, ainsi que leur ressources, ou de lui-même si None."""
@@ -91,7 +93,69 @@ class UserStates:
                 matrix[i][j] = 1
         return matrix
 
-    def add_user(self, user_name: str, neighbors: List[str], resources: Dict[str, Any]):
+    def _get_visibility_depth(self, user_name: str):
+        return (
+            self._depth_visibility[self.user_names.index(user_name)]
+            if len(self._depth_visibility) > 0
+            else DEFAULT_DEPTH_VISIBILITY
+        )
+
+    def get_distances(self, user_name: str) -> Dict[str, int]:
+
+        to_visit = [(name, 1) for name in self.get_neighbors(user_name)]
+        return_dict = {user_name: 0}
+
+        while len(to_visit) > 0:
+
+            curr_name, distance = to_visit.pop(0)
+
+            if curr_name not in return_dict:
+
+                return_dict[curr_name] = distance
+                to_add = [
+                    (name, distance + 1) for name in self.get_neighbors(curr_name)
+                ]
+
+                for t_name, t_distance in to_add:
+
+                    if t_name not in return_dict:
+
+                        to_visit.append((t_name, t_distance))
+
+        return return_dict
+
+    def get_distance(self, start_user: str, end_user: str) -> int:
+
+        if start_user == end_user:
+            return 0
+
+        to_visit = [(name, 1) for name in self.get_neighbors(start_user)]
+        visited = [start_user]
+
+        while len(to_visit) > 0:
+
+            curr_name, distance = to_visit.pop(0)
+
+            if curr_name == end_user:
+                return distance
+
+            to_add = [(name, distance + 1) for name in self.get_neighbors(curr_name)]
+
+            for t_name, t_distance in to_add:
+
+                if t_name not in visited:
+
+                    to_visit.append((t_name, t_distance))
+
+        return -1
+
+    def add_user(
+        self,
+        user_name: str,
+        neighbors: List[str],
+        resources: Dict[str, Any],
+        depth_visibility: int | None = None,
+    ):
         """Rajoute un utilisateur au réseau."""
         user_index = len(self.user_names)
         self.user_names.append(user_name)
@@ -100,6 +164,7 @@ class UserStates:
             if self.user_names[index] in neighbors:
                 self.adjacent_list[index].append(user_index)
         self.resources.append(resources)
+        self._depth_visibility.append(depth_visibility)
 
     def add_multiple_users(
         self,

@@ -192,10 +192,10 @@ class Node:
 class Graph:
     """Représente le graphe complet et gère ses nœuds et ses liens."""
 
-    REPULSION = 8000.0  # répulsion nœud-nœud
-    SPRING_K = 0.03  # raideur du ressort (liens)
+    REPULSION = 10000.0  # répulsion nœud-nœud
+    SPRING_K = 0.02  # raideur du ressort (liens)
     SPRING_LEN = 200.0  # longueur à vide du ressort
-    GRAVITY = 0.04  # attraction centrale
+    GRAVITY = 0.01  # attraction centrale
     MIN_DIST = 1.0  # évite division par zéro
 
     def __init__(

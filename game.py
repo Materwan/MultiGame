@@ -62,6 +62,7 @@ class Game(DefaultState):
         self._stdin_thread = threading.Thread(target=self._read_stdin, daemon=True)
 
         self._stdin_queue: Queue[str] = Queue()
+        self._pending_messages: Queue[Dict[str, Any]] = Queue()
         self.user_state = UserStates(self.name)
         self.neighbors: List[str] = []
         self.all_players: List[str] = []
@@ -134,7 +135,7 @@ class Game(DefaultState):
         while self.client.connected or not self.client.incoming_queue.empty():
             try:
                 data = self.client.incoming_queue.get(timeout=0.05)
-                self._handle_message(data)
+                self._pending_messages.put(data)
             except Empty:
                 pass
 
@@ -288,14 +289,20 @@ class Game(DefaultState):
                 self.all_resources[node_name] = res
                 self._update_interface_resources({node_name: res})
 
-        elif msg_type == "new_neighbor":
+        elif msg_type == "new_user":
+            """print("New user name : ", data.get("name"))
+            print("Neighbors : ", data.get("neighbors"))
+            print(
+                "Resources : ",
+                data.get("resources"),
+            )"""
             self.user_state.add_user(
                 data.get("name"),
-                [self.name],
+                data.get("neighbors"),
                 data.get("resources"),
             )
             self._sync_interface()
-            self.user_state.display_matrix()
+            # self.user_state.display_matrix()
 
         elif msg_type == "player_left":
             left_name = data.get("name")
@@ -509,6 +516,9 @@ class Game(DefaultState):
         Aucune variable locale majeure n'est utilisée.
         """
         super().update()
+        while not self._pending_messages.empty():
+            data = self._pending_messages.get()
+            self._handle_message(data)
         if self.interface:
             self.interface.update()
 

@@ -22,7 +22,10 @@ def generate_connexion(user_state: UserStates, new_user_name: str):
     nb_connections = min(random.randint(2, 3), len(user_state.user_names))
     neighbors = random.sample(user_state.user_names, nb_connections)
     user_state.add_user(
-        new_user_name, neighbors, {"CPU": DEFAULT_CPU, "RAM": DEFAULT_RAM}
+        new_user_name,
+        neighbors,
+        {"CPU": DEFAULT_CPU, "RAM": DEFAULT_RAM},
+        2,
     )
 
 

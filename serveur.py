@@ -19,7 +19,7 @@ class Server:
     """Gère le serveur de jeu, la logique réseau et la synchronisation de l'état du graphe.
 
     Variables d'instance principales :
-    - adjacent_list : structure de graphe utilisée pour stocker les utilisateurs et leurs voisins.
+    - user_states : structure de graphe utilisée pour stocker les utilisateurs et leurs voisins.
     - visual : interface visuelle optionnelle liée au serveur.
     - running : indique si le serveur doit continuer à tourner.
     - server : instance de ServerNetwork utilisée pour la communication avec les clients.
@@ -44,7 +44,7 @@ class Server:
         """Initialise le serveur, la structure du graphe et la communication réseau.
 
         Variables d'instance créées :
-        - adjacent_list : graphe initialisé avec quelques utilisateurs de test.
+        - user_states : graphe initialisé avec quelques utilisateurs de test.
         - visual : référence à l'interface visuelle passée en paramètre.
         - running : état de fonctionnement du serveur.
         - server : serveur réseau prêt à accepter des connexions.
@@ -53,7 +53,7 @@ class Server:
           joueur) que le serveur accepte de révéler à ce joueur. 1 = voisins
           directs uniquement (comportement historique).
         """
-        self.adjacent_list = UserStates()
+        self.user_states = UserStates()
 
         self.visual = visual
         self.visibility_depth = visibility_depth
@@ -87,28 +87,52 @@ class Server:
           l'ajout de l'utilisateur au graphe.
         - name : nom du joueur venant de se connecter.
         """
-        name = data.get("name", "?")
-        generate_connexion(self.adjacent_list, name)
+        new_user_name = data.get("name", "?")
+        generate_connexion(self.user_states, new_user_name)
         response = {"type": "handshake"}
 
         print(
-            f"[Game] '{name}' joined — neighbors: {self.adjacent_list.get_neighbors(name)}"
+            f"[Game] '{new_user_name}' joined — neighbors: {self.user_states.get_neighbors(new_user_name)}"
         )
 
-        # Seuls les vrais voisins directs (arêtes du graphe) doivent être
-        # notifiés de l'arrivée : c'est une relation d'adjacence réelle,
-        # indépendante de la profondeur de visibilité accordée à `name`.
-        # Notifier des nœuds plus lointains créerait de fausses arêtes chez
-        # ces clients.
-        for neighbor in self.adjacent_list.get_neighbors(name):
-            self.server.send_to(
-                neighbor,
-                {
-                    "type": "new_neighbor",
-                    "name": name,
-                    "resources": self.adjacent_list.get_resources(name),
-                },
-            )
+        new_user_neighbors = self.user_states.get_neighbors(new_user_name)
+        distances_to_new_user = self.user_states.get_distances(new_user_name)
+        new_user_resources = self.user_states.get_resources(new_user_name)
+
+        # print(distances_to_new_user)
+
+        for curr_name, distance in distances_to_new_user.items():
+
+            curr_visibility = self.user_states._get_visibility_depth(curr_name)
+
+            if distance < curr_visibility:
+
+                self.server.send_to(
+                    curr_name,
+                    {
+                        "type": "new_user",
+                        "name": new_user_name,
+                        "neighbors": new_user_neighbors,
+                        "resources": new_user_resources,
+                    },
+                )
+
+            elif distance == curr_visibility:
+
+                self.server.send_to(
+                    curr_name,
+                    {
+                        "type": "new_user",
+                        "name": new_user_name,
+                        "neighbors": [
+                            t_name
+                            for t_name in self.user_states.get_neighbors(curr_name)
+                            if self.user_states.get_distance(new_user_name, t_name)
+                            < curr_visibility
+                        ],
+                        "resources": new_user_resources,
+                    },
+                )
 
         return response
 
@@ -119,7 +143,7 @@ class Server:
         - name : nom du joueur qui vient de quitter.
         """
         print(f"[Game] '{name}' left the game")
-        self.adjacent_list.remove_user(name)
+        self.user_states.remove_user(name)
 
         self.server.broadcast(
             {
@@ -154,7 +178,7 @@ class Server:
 
         elif msg_type == "get_node_resources":
             target = data.get("target")
-            res = self.adjacent_list.get_resources(target) if target else {}
+            res = self.user_states.get_resources(target) if target else {}
             response = {
                 "type": "node_resources",
                 "name": target,
@@ -204,7 +228,7 @@ class Server:
         - are_neighbors : indique si l'attaquant et la cible sont voisins.
         - result : réponse envoyée au client attaquant.
         """
-        names = self.adjacent_list.user_names
+        names = self.user_states.user_names
         if target not in names:
             return {
                 "type": "attack_result",
@@ -217,7 +241,7 @@ class Server:
 
         are_neighbors = (
             attacker_idx >= 0
-            and target_idx in self.adjacent_list.adjacent_list[attacker_idx]
+            and target_idx in self.user_states.adjacent_list[attacker_idx]
         )
 
         result = {"type": "attack_result", "target": target, "success": are_neighbors}
@@ -237,7 +261,7 @@ class Server:
         - neighbors : voisins directs réels du joueur (arêtes du graphe).
         - all_resources : ressources de tous les nœuds visibles autour du joueur.
         """
-        names = self.adjacent_list.user_names
+        names = self.user_states.user_names
         if name not in names:
             return {
                 "type": "state",
@@ -248,7 +272,9 @@ class Server:
 
         return {
             "type": "state",
-            "users": self.adjacent_list.get_all_data_depth(name, 2),
+            "users": self.user_states.get_all_data_depth(
+                name, self.user_states._get_visibility_depth(name)
+            ),
         }
 
     def _run(self):
@@ -285,7 +311,7 @@ class Server:
         self._server_thread.start()
 
         for _ in range(5):
-            self._on_connect({"name": f"User {len(self.adjacent_list.user_names)}"})
+            self._on_connect({"name": f"User {len(self.user_states.user_names)}"})
 
         self._input_loop()
 
@@ -323,7 +349,7 @@ class Server:
         def _handle_get(command: List[str]):
             if len(command) > 1:
                 if command[1] == "graph":
-                    self.adjacent_list.display_matrix()
+                    self.user_states.display_matrix()
                 elif command[1] == "connected":
                     print(f"\nConnected: {self.server.connected_names()}")
                 else:
@@ -355,7 +381,7 @@ class Server:
             if self.visual.running:
                 print("\nVisual interface already running.")
             else:
-                self.visual.trigger(self.adjacent_list)
+                self.visual.trigger(self.user_states)
 
         def _handle_exit(command: List[str]):
             if not self.visual.running:
@@ -379,7 +405,7 @@ class Server:
                 print("\nUsage: log [option] [n] (n >= 1)")
 
         def _handle_generate(command: List[str]):
-            self._on_connect({"name": f"User_{len(self.adjacent_list.user_names)}"})
+            self._on_connect({"name": f"User_{len(self.user_states.user_names)}"})
 
         def _handle_depth(command: List[str]):
             if len(command) > 1 and command[1].isdigit() and int(command[1]) >= 1:
@@ -484,9 +510,7 @@ class Visual:
             else:
                 self.interface.graph.user_states = self.user_stats
                 self.interface.graph.users = self.user_stats.user_names
-                self.interface.graph.adjacent_list = (
-                    self.user_stats.get_adjacent_matrix()
-                )
+                self.interface.graph.user_states = self.user_stats.get_adjacent_matrix()
 
         self.interface.user_data = {
             name: {"CPU": 10, "RAM": 10} for name in self.user_stats.user_names
