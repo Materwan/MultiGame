@@ -1,10 +1,13 @@
 import os
 import sys
 import random
+import pprint
 from typing import List, Tuple, Dict
 from abc import ABC, abstractmethod
 
 import pygame
+
+from utils import *
 
 WHITE = (255, 255, 255)
 BLACK = (0, 0, 0)
@@ -22,6 +25,18 @@ if __name__ != "__main__":
     DEFAULTSCREEN = pygame.display.set_mode(DEFAULTSCREENSIZE, pygame.RESIZABLE)
 
     WINDOW = Window.from_display_module()
+
+
+def format_log(log: Dict[str, Any], include: str | None = None) -> str:
+    time = log["time"]
+    data = log.get("data")
+    type = data.get("type")
+    response = log.get("response", "?")
+    return (
+        f"""[{datetime.fromtimestamp(time).strftime("%a %d %b %Y %H:%M:%S")}]\t[{type}]\t\n\t[Response]\t{"\n\t\t\t".join(pprint.pformat(response, width=100).split("\n"))}"""
+        if include == "-r"
+        else f"""[{datetime.fromtimestamp(time).strftime("%a %d %b %Y %H:%M:%S")}]\t[{type}]"""
+    )
 
 
 class BaseManager:

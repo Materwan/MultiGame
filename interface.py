@@ -3,6 +3,7 @@ import random
 from typing import Dict, List, Optional, Tuple, Any
 
 import pygame
+from utils import *
 
 # ===== Colors =====
 
@@ -191,22 +192,29 @@ class Node:
 class Graph:
     """Représente le graphe complet et gère ses nœuds et ses liens."""
 
+    REPULSION = 8000.0  # répulsion nœud-nœud
+    SPRING_K = 0.03  # raideur du ressort (liens)
+    SPRING_LEN = 200.0  # longueur à vide du ressort
+    GRAVITY = 0.04  # attraction centrale
+    MIN_DIST = 1.0  # évite division par zéro
+
     def __init__(
         self,
         screen: pygame.Surface,
-        users: List[str],
-        adjacent_list: List[List[int]],
+        user_states: UserStates,
         self_name: str | None = None,
     ):
 
         self.screen = screen
+        self.self_name = self_name
 
-        self.users = users
-        self.adjacent_list = adjacent_list
+        self.user_states = user_states
+        self.users = user_states.user_names
+        self.adjacent_list = user_states.get_adjacent_matrix()
 
         self.nodes: List[Node] = []
         for name in self.users:
-            self.nodes.append(Node(self.screen, name, name == self_name))
+            self.nodes.append(Node(self.screen, name, name == self.self_name))
 
     @property
     def is_dragging(self):
@@ -214,6 +222,32 @@ class Graph:
         if any([node.dragging for node in self.nodes]):
             return True
         return False
+
+    def sync(self):
+        """Met à jour le graphe en place à partir d'un nouvel état des joueurs.
+
+        Contrairement à une reconstruction complète, cette méthode conserve les
+        instances de `Node` existantes (position, vitesse, drag, hover, fenêtre
+        associée...) pour les joueurs toujours présents. Seuls les nouveaux
+        joueurs entraînent la création d'un `Node`, et seuls les joueurs partis
+        sont retirés.
+
+        Paramètres :
+        - user_states : état courant des joueurs (source de vérité pour les
+          noms et la matrice d'adjacence).
+        - self_name : nom du joueur local, utilisé pour marquer son nœud.
+        - on_click : callback à attacher aux nœuds nouvellement créés (les
+          nœuds déjà existants conservent leur callback actuel).
+
+        Retourne la liste des noms de joueurs qui ont été retirés du graphe,
+        afin que l'appelant puisse par exemple fermer leurs fenêtres d'info.
+        """
+
+        self.adjacent_list = self.user_states.get_adjacent_matrix()
+
+        self.nodes: List[Node] = []
+        for name in self.users:
+            self.nodes.append(Node(self.screen, name, name == self.self_name))
 
     def _handle_events(
         self, events: List[pygame.event.Event], offset: pygame.Vector2, zoom: float
@@ -225,27 +259,21 @@ class Graph:
     def update(self, offset: pygame.Vector2, zoom: float):
         """Met à jour la position des nœuds selon les forces de répulsion et d'attraction."""
 
-        REPULSION = 8000.0  # répulsion nœud-nœud
-        SPRING_K = 0.03  # raideur du ressort (liens)
-        SPRING_LEN = 200.0  # longueur à vide du ressort
-        GRAVITY = 0.04  # attraction centrale
-        MIN_DIST = 1.0  # évite division par zéro
-
         n = len(self.nodes)
 
         for i in range(n):
             ni = self.nodes[i]
 
             # --- Force centrale (gravité vers l'origine) ---
-            ni.force -= ni.pos * GRAVITY
+            ni.force -= ni.pos * self.GRAVITY
 
             for j in range(i + 1, n):
                 nj = self.nodes[j]
                 delta = ni.pos - nj.pos
-                dist = max(delta.length(), MIN_DIST)
+                dist = max(delta.length(), self.MIN_DIST)
 
                 # --- Répulsion nœud-nœud (Coulomb) ---
-                rep_mag = REPULSION / (dist * dist)
+                rep_mag = self.REPULSION / (dist * dist)
                 rep = delta.normalize() * rep_mag
                 ni.force += rep
                 nj.force -= rep
@@ -258,8 +286,8 @@ class Graph:
                 )
 
                 if connected:
-                    stretch = dist - SPRING_LEN
-                    spring_mag = SPRING_K * stretch
+                    stretch = dist - self.SPRING_LEN
+                    spring_mag = self.SPRING_K * stretch
                     spring = delta.normalize() * spring_mag
                     ni.force -= spring
                     nj.force += spring
@@ -508,6 +536,19 @@ class WindowManager:
         """Indique si une fenêtre est actuellement en train d'être déplacée."""
         return any([window._dragging for window in self.windows])
 
+    def remove_windows_for(self, names: List[str]):
+        """Ferme les fenêtres associées aux noms donnés (ex: joueurs qui ont quitté).
+
+        Les `NodeInfoWindow` sont indexées par titre (= nom du nœud), donc on
+        filtre simplement les fenêtres dont le titre correspond à un nom fourni.
+        """
+        if not names:
+            return
+        names_set = set(names)
+        self.windows = [
+            window for window in self.windows if window.title not in names_set
+        ]
+
     def _handle_events(
         self, events: List[pygame.event.Event], offset: pygame.Vector2, zoom: float
     ):
@@ -544,14 +585,15 @@ class Interface:
     def __init__(
         self,
         screen: pygame.Surface,
-        users: List[str],
-        adjacent_list: List[List[int]],
+        user_states: UserStates,
         self_name: str | None = None,
     ):
 
         self.screen = screen
 
-        self._build_graph(users, adjacent_list, self_name)
+        self.user_data: Dict[str, Dict[str, int]] = {}
+
+        self._build_graph(user_states, self_name)
         self.windows_manager = WindowManager(self.screen)
 
         self.zoom: float = 1.0
@@ -565,13 +607,12 @@ class Interface:
 
     def _build_graph(
         self,
-        users: List[str],
-        adjacent_list: List[List[int]],
+        user_states: UserStates,
         self_name: str | None = None,
     ):
         """Construit le graphe graphique et attache les callbacks de clic aux nœuds."""
 
-        self.graph = Graph(self.screen, users, adjacent_list, self_name)
+        self.graph = Graph(self.screen, user_states, self_name)
 
         for node in self.graph.nodes:
             node.on_click = self._on_node_click
@@ -594,6 +635,16 @@ class Interface:
     def get_user_info(self, user_name: str):
         """Retourne les informations d'un utilisateur depuis les données de l'interface."""
         return self.user_data[user_name]
+
+    def sync(self):
+        """Met à jour l'interface existante en place, sans la reconstruire.
+
+        Délègue la mise à jour des nœuds/liens à `Graph.sync`, qui conserve
+        les nœuds déjà existants (position, drag, hover...), et ferme les
+        fenêtres d'info des joueurs qui ont quitté la partie.
+        """
+        self.graph.sync()
+        # self.windows_manager.remove_windows_for(removed)
 
     def event(self, events: List[pygame.event.Event]):
         """Traite les événements de la souris, du zoom et du déplacement de la caméra."""
@@ -690,8 +741,22 @@ class Interface:
 
 if __name__ == "__main__":
 
-    users = ["user_1", "user_2", "user_3", "user_4"]
-    adjacent_list = [[0, 1, 1, 1], [1, 0, 1, 0], [0, 1, 1, 1], [1, 0, 1, 0]]
+    user_states = UserStates("user_1")
+    user_states.add_multiple_users(
+        ["user_1", "user_2", "user_3", "user_4"],
+        [
+            ["user_2", "user_3", "user_4"],
+            ["user_1", "user_3"],
+            ["user_1", "user_2", "user_4"],
+            ["user_1", "user_3"],
+        ],
+        [
+            {"cpu": 10, "ram": 10},
+            {"cpu": 8, "ram": 6},
+            {"cpu": 7, "ram": 9},
+            {"cpu": 6, "ram": 5},
+        ],
+    )
 
     class Game:
 
@@ -701,8 +766,10 @@ if __name__ == "__main__":
             self.clock = pygame.time.Clock()
             self.running = True
 
-            self.interface = Interface(self.screen, users, adjacent_list, "user_1")
-            self.interface.user_data = {name: {"CPU": 10, "RAM": 10} for name in users}
+            self.interface = Interface(self.screen, user_states, "user_1")
+            self.interface.user_data = {
+                name: {"CPU": 10, "RAM": 10} for name in user_states.user_names
+            }
 
         def event(self):
 

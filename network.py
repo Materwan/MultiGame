@@ -210,11 +210,8 @@ class ServerNetwork:
 
         player_name = data.get("name", f"Unknown_{peer}")
 
-        # Appel du callback de connexion (ex: adjacent_list.add_user)
-        if self.on_guest_connect is not None:
-            initial_response = self.on_guest_connect(data)
-        else:
-            initial_response = {"type": "handshake"}
+        self.on_guest_connect(data)
+        initial_response = {"type": "handshake"}
 
         # Enregistrement du client dans le registre
         with self._lock:
@@ -238,11 +235,9 @@ class ServerNetwork:
                     break
 
                 incoming = bytes_to_dict(raw)
-                if incoming is None or incoming.get("close"):
-                    print(f"[Server] Client '{player_name}' closed the connection")
-                    break
 
-                if data.get("type") == "close":
+                if incoming.get("type") == "close":
+                    self.incoming_queue.put((player_name, incoming))
                     break
 
                 # Pousse le message dans la queue avec l'identité de l'émetteur
@@ -259,8 +254,6 @@ class ServerNetwork:
             except Exception:
                 pass  # Connexion déjà fermée ou erreur réseau
             print(f"[Server] Connection closed with '{player_name}'")
-            if self.on_guest_disconnect is not None:
-                self.on_guest_disconnect(player_name)
 
 
 class ClientNetwork:
@@ -287,7 +280,6 @@ class ClientNetwork:
         # File de messages entrants depuis le serveur
         self.incoming_queue: queue.Queue[Dict[str, Any]] = queue.Queue()
 
-        self.initial_state: Dict[str, Any] = {}
         self.connected: bool = False
         self.rtt_tracker = RttTracker()
 
@@ -369,10 +361,8 @@ class ClientNetwork:
             writer.close()
             return
 
-        self.initial_state = data
         self.connected = True
         print(f"[Guest] Connected to {self.host}:{self.port}")
-        print(f"[Guest] Initial state: {data}")
 
         await self._receive_loop(reader, writer)
 
