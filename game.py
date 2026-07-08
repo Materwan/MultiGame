@@ -556,6 +556,19 @@ class MultiGame(DefaultGame):
 
 
 class SoloGame(DefaultGame):
+    """Rejoue localement, sans réseau, exactement le pipeline de `Server`.
+
+    Le joueur local et les bots sont gérés par la même `GameLogic` que celle
+    utilisée par `Server`. Deux circuits distincts remplacent le réseau :
+    - `send` (hérité de `DefaultGame`, appelé par `attack`/`ping`/`request_state`
+      et par `_handle_message`) : messages du joueur -> `GameLogic`, déposés
+      dans `_pending_messages_game` et consommés par `_run` (équivalent de
+      `Server._run` lisant `server.incoming_queue`).
+    - `_game_send` / `_game_broadcast` (passés à `GameLogic.initialize`,
+      équivalents de `server.send_to`/`server.broadcast`) : messages de
+      `GameLogic` -> joueur, déposés dans `_pending_messages` et consommés par
+      `DefaultGame.update()` via `_handle_message` (mise à jour de l'UI).
+    """
 
     def __init__(self, screen, manager, name="Materwan"):
         super().__init__(screen, manager, name)
@@ -567,31 +580,36 @@ class SoloGame(DefaultGame):
 
         self._pending_messages_game: Queue[Dict[str, Any]] = Queue()
 
-    def send(self, user_name: str, data: Dict[str, Any]):
-        """Place les données dans la queue de traitement client."""
-
-        if user_name == self.name:
-
-            self._pending_messages.put(data)
-
-    def broadcast(self, data: Dict[str, Any]):
-        """Place les données dans la queue de traitement client."""
-
-        self._pending_messages.put(data)
+    # ------------------------------------------------------------------
+    # Cycle de vie
+    # ------------------------------------------------------------------
 
     def start(self):
+        """Initialise la logique de jeu, connecte le joueur local, puis
+        démarre la boucle de traitement, exactement comme `Server.start`."""
 
-        self.game_logic.initialize(self.send, self.broadcast, 5)
+        self.game_logic.initialize(self._game_send, self._game_broadcast, 5)
 
         self._game_thread = threading.Thread(target=self._run, daemon=True)
         self._game_thread.start()
+
+        # Équivalent local de la connexion réseau d'un client au serveur.
+        self.game_logic._on_connect({"name": self.name})
+
+        # Équivalent de `self.client.send({"type": "get_state"})` dans MultiGame.
+        self.send({"type": "get_state"})
+        # self.request_state()
 
     def close(self):
 
         self.running = False
 
+    def close_connexion(self):
+        """Pas de connexion réseau à fermer en solo : simple alias de `close`."""
+        self.close()
+
     def _run(self):
-        """Boucle principale de réception des messages réseau entrants.
+        """Boucle principale de traitement des messages du joueur local.
 
         Variables locales utilisées :
         - sender, data : expéditeur et contenu du message lu depuis la file d'attente.
@@ -600,5 +618,39 @@ class SoloGame(DefaultGame):
             try:
                 sender, data = self._pending_messages_game.get(timeout=0.05)
                 self.game_logic._handle_message(sender, data)
+            except Empty:
+                pass
             except Exception:
                 pass
+
+    # ------------------------------------------------------------------
+    # Envoi entre logique de jeu et affichage
+    # ------------------------------------------------------------------
+
+    def send(self, data: Dict[str, Any]):
+        """Envoie un message du joueur local vers la logique de jeu.
+
+        Remplace l'envoi réseau (`ClientNetwork.send`) : le message est
+        simplement déposé dans la file traitée par `_run`, qui appelle
+        `GameLogic._handle_message`, exactement comme le ferait le serveur
+        en recevant un message d'un vrai client.
+        """
+        self._pending_messages_game.put((self.name, data))
+
+    def _game_send(self, user_name: str, data: Dict[str, Any]):
+        """Callback fourni à `GameLogic` (équivalent de `server.send_to`).
+
+        Seul le joueur local dispose d'une file d'entrée ; les messages
+        destinés aux bots sont ignorés, comme ils le seraient de toute façon
+        côté serveur (aucun client réseau ne les reçoit).
+        """
+        if user_name == self.name:
+            self._pending_messages.put(data)
+
+    def _game_broadcast(self, data: Dict[str, Any]):
+        """Callback fourni à `GameLogic` (équivalent de `server.broadcast`).
+
+        Seul le joueur local est un client réel : il reçoit tous les
+        messages diffusés.
+        """
+        self._pending_messages.put(data)

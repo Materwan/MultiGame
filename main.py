@@ -105,9 +105,8 @@ class Manager(BaseManager):
 
             self.clock.tick(30)
 
-        self.states[
-            "Game"
-        ].close_connexion()  # Fermer la connexion lorsque le jeu se termine
+        self.states["Solo_Game"].close_connexion()
+        self.states["Multi_Game"].close_connexion()
 
 
 game = Manager(DEFAULTSCREEN)
@@ -116,9 +115,8 @@ game = Manager(DEFAULTSCREEN)
 try:
     game.run()
 except KeyboardInterrupt:
-    game.states[
-        "Game"
-    ].close_connexion()  # Fermer la connexion lorsque le jeu se termine
+    game.states["Solo_Game"].close_connexion()
+    game.states["Multi_Game"].close_connexion()
     pygame.quit()
 
 pygame.quit()
