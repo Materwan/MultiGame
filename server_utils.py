@@ -18,17 +18,6 @@ def format_log(log: Dict[str, Any], include: str | None = None) -> str:
     )
 
 
-def generate_connexion(user_state: UserStates, new_user_name: str):
-    nb_connections = min(random.randint(2, 3), len(user_state.user_names))
-    neighbors = random.sample(user_state.user_names, nb_connections)
-    user_state.add_user(
-        new_user_name,
-        neighbors,
-        {"CPU": DEFAULT_CPU, "RAM": DEFAULT_RAM},
-        2,
-    )
-
-
 def generate_random_users(user_state: UserStates, num_users: int):
     for _ in range(num_users):
         new_user_name = f"User {_}"

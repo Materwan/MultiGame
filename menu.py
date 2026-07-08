@@ -211,7 +211,7 @@ class PrincipalMenu(DefaultMenu):
                 if self.buttons["settings"].rect.collidepoint(event.pos):
                     self.manager.change_state("Settings_Menu")
                 if self.buttons["play"].rect.collidepoint(event.pos):
-                    self.manager.change_state("Game")
+                    self.manager.change_state("Play_Menu")
 
     def update(self):
         super().update()
@@ -233,14 +233,50 @@ class SettingsMenu(DefaultMenu):
         cy = h // 2
         gap = 70
         self.buttons = {
-            "quit": Button("[ QUIT ]", (cx, cy + gap), 220, 48, self.mono_btn),
+            "return": Button("[ RETURN ]", (cx, cy + gap), 220, 48, self.mono_btn),
         }
 
     def event(self, events: List[pygame.event.Event]):
         super().event(events)
         for event in events:
             if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                if self.buttons["quit"].rect.collidepoint(event.pos):
+                if self.buttons["return"].rect.collidepoint(event.pos):
+                    self.manager.change_state("Principal_Menu")
+
+    def update(self):
+        super().update()
+
+    def display(self):
+        super().display()
+
+        pygame.display.flip()
+
+
+class PlayMenu(DefaultMenu):
+
+    def __init__(self, screen, manager):
+        super().__init__(screen, manager)
+
+    def _init_buttons(self):
+        w, h = self.screen.get_size()
+        cx = w // 2
+        cy = h // 2
+        gap = 70
+        self.buttons = {
+            "solo": Button("[ SOLO ]", (cx, cy - gap), 220, 48, self.mono_btn),
+            "multi": Button("[ MULTI ]", (cx, cy), 220, 48, self.mono_btn),
+            "return": Button("[ RETURN ]", (cx, cy + gap), 220, 48, self.mono_btn),
+        }
+
+    def event(self, events):
+        super().event(events)
+        for event in events:
+            if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+                if self.buttons["solo"].rect.collidepoint(event.pos):
+                    self.manager.change_state("Solo_Game")
+                if self.buttons["multi"].rect.collidepoint(event.pos):
+                    self.manager.change_state("Multi_Game")
+                if self.buttons["return"].rect.collidepoint(event.pos):
                     self.manager.change_state("Principal_Menu")
 
     def update(self):

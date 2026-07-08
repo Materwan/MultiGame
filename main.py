@@ -8,8 +8,8 @@ pygame.display.init()
 pygame.mixer.init()
 
 from client_utils import *
-from menu import PrincipalMenu, SettingsMenu
-from game import Game
+from menu import PrincipalMenu, SettingsMenu, PlayMenu
+from game import DefaultGame, MultiGame, SoloGame
 
 
 class Manager(BaseManager):
@@ -32,18 +32,19 @@ class Manager(BaseManager):
         # -- State Manager --
         self.states: Dict[str, DefaultState] = {
             "Principal_Menu": PrincipalMenu(self.screen, self),
+            "Play_Menu": PlayMenu(self.screen, self),
             "Settings_Menu": SettingsMenu(self.screen, self),
-            "Game": Game(self.screen, self),
+            "Solo_Game": SoloGame(self.screen, self),
+            "Multi_Game": MultiGame(self.screen, self),
         }
         self.state = self.states.get("Principal_Menu", PrincipalMenu(self.screen, self))
 
     def change_state(self, new_state_name: str):
         """Change l'état actuel du jeu."""
         if new_state_name in self.states:
-            if new_state_name == "Game":
-                game_state = self.states["Game"]
-                if isinstance(game_state, Game):
-                    game_state.start()
+            if new_state_name == "Solo_Game" or new_state_name == "Multi_Game":
+                game_state = self.states[new_state_name]
+                game_state.start()
             self.state = self.states[new_state_name]
         else:
             raise ValueError(

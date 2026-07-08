@@ -12,57 +12,13 @@ from network import ClientNetwork
 from interface import Interface
 
 
-class Game(DefaultState):
-    """Gère l'état de jeu principal, la communication réseau et la synchronisation avec l'interface.
+class DefaultGame(DefaultState):
 
-    Variables d'instance principales :
-    - host, port, name : paramètres de connexion du client.
-    - client : instance de ClientNetwork utilisée pour envoyer et recevoir les messages.
-    - _game_thread : thread de fond qui traite les messages entrants.
-    - neighbors, all_players, connected_players : listes des joueurs visibles et connectés.
-    - resources, all_resources : ressources du joueur courant et des autres nœuds connus.
-    - interface : référence vers l'interface graphique associée au jeu.
-
-    Méthodes principales :
-    - start, close_connexion : gestion du cycle de vie réseau.
-    - _run, _handle_message : traitement des messages entrants.
-    - _build_adjacent_matrix, _build_user_data : construction des données utilisées par le graphe.
-    - _update_interface_resources, _sync_interface, _apply_initial_state : synchronisation avec l'interface.
-    - send, attack, request_state, ping : envoi de commandes au serveur.
-    - event, update, display : intégration avec la boucle PyGame.
-    """
-
-    def __init__(
-        self,
-        screen: pygame.Surface,
-        manager: BaseManager,
-        host: str = socket.gethostbyname(socket.gethostname()),
-        port: int = 5555,
-        name: str = "Materwan",
-    ):
-        """Initialise la vue de jeu, la connexion réseau et les structures internes.
-
-        Variables d'instance créées :
-        - host, port, name : paramètres de connexion du joueur.
-        - client : client réseau prêt à se connecter au serveur.
-        - _game_thread : thread de fond dédié au traitement des messages.
-        - neighbors, all_players, connected_players : listes d'information réseau.
-        - resources, all_resources : état des ressources du joueur et des autres nœuds.
-        - interface : interface graphique encore non initialisée.
-        """
+    def __init__(self, screen, manager, name: str = "Materwan"):
         super().__init__(screen, manager)
 
-        self.host = host
-        self.port = port
         self.name = name
 
-        self.client: ClientNetwork = None
-        self._game_thread: threading.Thread = None
-        self._input_thread: threading.Thread = None
-        self._stdin_thread = threading.Thread(target=self._read_stdin, daemon=True)
-
-        self._stdin_queue: Queue[str] = Queue()
-        self._pending_messages: Queue[Dict[str, Any]] = Queue()
         self.user_state = UserStates(self.name)
         self.neighbors: List[str] = []
         self.all_players: List[str] = []
@@ -70,201 +26,15 @@ class Game(DefaultState):
         self.resources: Dict[str, Any] = {}
         self.all_resources: Dict[str, Dict[str, Any]] = {}
 
-        self.interface: Interface = Interface(self.screen, self.user_state, self.name)
+        self._pending_messages: Queue[Dict[str, Any]] = Queue()
 
         self.logs: List[Dict[str, Any]] = []
 
-        self._stdin_thread.start()
-
-    def _initialize(self):
-        self.client = ClientNetwork(self.host, self.port, self.name)
-        self._game_thread = threading.Thread(target=self._run, daemon=True)
-        self._input_thread = threading.Thread(target=self._input_loop, daemon=True)
-
-        self._stdin_queue: Queue[str] = Queue()
-        self.user_state = UserStates(self.name)
-
         self.interface: Interface = Interface(self.screen, self.user_state, self.name)
 
-        self.logs: List[Dict[str, Any]] = []
-
     # ------------------------------------------------------------------
-    # Cycle de vie
+    # Boucle de traitement des messages client
     # ------------------------------------------------------------------
-
-    def start(self):
-        """Démarre la connexion au serveur et lance la boucle de jeu.
-
-        Variables locales utilisées :
-        - deadline : temporisation de 3 secondes pour attendre la connexion.
-        """
-        self._initialize()
-        self.client.start()
-
-        deadline = time.time() + 3.0
-        while not self.client.connected and time.time() < deadline:
-            time.sleep(0.05)
-
-        if self.client.connected:
-            # self._apply_initial_state(self.client.initial_state)
-            if not self._game_thread.is_alive():
-                self._game_thread.start()
-            if not self._input_thread.is_alive():
-                self._input_thread.start()
-            self.client.send({"type": "get_state"})
-        else:
-            print("[Game] Failed to connect to server")
-
-    def close_connexion(self):
-        """Ferme proprement la connexion réseau active.
-
-        Aucune variable locale majeure n'est utilisée.
-        """
-        self.client.close()
-
-    # ------------------------------------------------------------------
-    # Boucle de traitement des messages entrants
-    # ------------------------------------------------------------------
-
-    def _run(self):
-        """Lit en continu les messages entrants et les transmet au gestionnaire.
-
-        Variables locales utilisées :
-        - data : message réseau extrait de la file d'attente.
-        """
-        while self.client.connected or not self.client.incoming_queue.empty():
-            try:
-                data = self.client.incoming_queue.get(timeout=0.05)
-                self._pending_messages.put(data)
-            except Empty:
-                pass
-
-    def _read_stdin(self):
-        """Tourne dans un thread daemon dédié : peut rester bloqué sur input()
-        sans jamais empêcher le programme de se terminer."""
-        while True:
-            try:
-                line = input()
-            except (EOFError, KeyboardInterrupt):
-                self._stdin_queue.put(None)  # signal de fin
-                return
-            self._stdin_queue.put(line)
-
-    def _input_loop(self):
-        """Boucle console pour saisir des commandes de jeu pendant l'exécution.
-
-        Commandes prises en charge :
-        - help : affiche l'aide.
-        - ping : envoie un ping au serveur.
-        - state : demande une mise à jour de l'état.
-        - attack <cible> : attaque un joueur.
-        - get neighbors|players|connected|resources : affiche les données locales.
-        - quit|exit|close : ferme la connexion et arrête le jeu.
-        """
-
-        def _handle_help(command: List[str]):
-            print(
-                "\nCommands: help | ping | state | attack <target> | get <neighbors|players|connected|resources> | quit"
-            )
-
-        def _handle_ping(command: List[str]):
-            self.ping()
-            print("\nPing sent to server.")
-
-        def _handle_state(command: List[str]):
-            self.request_state()
-            print("\nState request sent.")
-
-        def _handle_attack(command: List[str]):
-            if len(command) > 1:
-                target = command[1]
-                self.attack(target)
-                print(f"\nAttack request sent to '{target}'.")
-            else:
-                print("\nUsage: attack <target>")
-
-        def _handle_get(command: List[str]):
-            if len(command) > 1:
-                option = command[1]
-                if option == "neighbors":
-                    print(f"\nNeighbors: {self.neighbors}")
-                elif option in ("players", "all_players"):
-                    print(f"\nAll players: {self.all_players}")
-                elif option == "connected":
-                    print(f"\nConnected players: {self.connected_players}")
-                elif option == "resources":
-                    print(f"\nMy resources: {self.resources}")
-                    print(f"All resources: {self.all_resources}")
-                elif option == "graph":
-                    self.user_state.display_matrix()
-                else:
-                    print("\nUsage: get neighbors | players | connected | resources")
-            else:
-                print("\nUsage: get neighbors | players | connected | resources")
-
-        def _handle_log(command: List[str]):
-            number = 0
-            tag = ""
-            for arg in command[1:]:
-                if arg.isdigit():
-                    number = int(arg)
-                else:
-                    tag = arg
-            if number != 0:
-                print()
-                for message in self.logs[-int(number) :]:
-                    print(format_log(message, tag))
-            else:
-                print("\nUsage: log [option] [n] (n >= 1)")
-
-        def _handle_exec(command: List[str]):
-            if len(command) > 1:
-                code_str = " ".join(command[1:])
-                try:
-                    # Contexte local avec accès à `self`
-                    local_vars = {"self": self}
-                    print()
-                    exec(code_str, globals(), local_vars)
-                except Exception as e:
-                    print(f"\n[Error] {type(e).__name__}: {e}")
-                    print("\n[Traceback]")
-                    traceback.print_exc()
-            else:
-                print("\nUsage: exec <python code>")
-
-        def _handle_quit(command: List[str]):
-            self.close_connexion()
-            self.manager.running = False
-            print("\nClosing game.")
-
-        commands: Dict[str, Callable[[List[str]], None]] = {
-            "help": _handle_help,
-            "ping": _handle_ping,
-            "state": _handle_state,
-            "attack": _handle_attack,
-            "get": _handle_get,
-            "log": _handle_log,
-            "exec": _handle_exec,
-            "quit": _handle_quit,
-        }
-
-        while self.manager.running and self.client.connected:
-
-            try:
-                line = self._stdin_queue.get(timeout=0.1)
-            except Empty:
-                continue
-
-            if line:
-                ask = line.strip().split(" ")
-                used = False
-                for command in commands:
-                    if ask[0] == command:
-                        used = True
-                        commands[command](ask)
-                        break
-                if not used:
-                    print("Unknown command. Try 'help'.")
 
     def _handle_message(self, data: Dict[str, Any]):
         """Traite un message réseau reçu et met à jour l'état local.
@@ -438,6 +208,301 @@ class Game(DefaultState):
         self.interface.sync()
         self.interface.user_data = self._build_user_data()
 
+    # ------------------------------------------------------------------
+    # Boucle PyGame
+    # ------------------------------------------------------------------
+
+    def event(self, events: List[pygame.event.Event]):
+        """Traite les événements PyGame et les routes vers les composants concernés.
+
+        Paramètre utilisé :
+        - events : liste des événements pygame à analyser.
+        """
+        super().event(events)
+        for event in events:
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_p:
+                    self.ping()
+                if event.key == pygame.K_r:
+                    self.request_state()
+
+        if self.interface:
+            self.interface.event(events)
+
+    def update(self):
+        """Met à jour l'état courant du jeu.
+
+        Aucune variable locale majeure n'est utilisée.
+        """
+        super().update()
+        while not self._pending_messages.empty():
+            data = self._pending_messages.get()
+            self._handle_message(data)
+        if self.interface:
+            self.interface.update()
+
+        if self.__class__.__name__ == "MultiGame" and not self.client.connected:
+            self.manager.change_state("Principal_Menu")
+
+    def display(self):
+        """Rafraîchit l'affichage du jeu et de la vue graphique.
+
+        Variables locales utilisées :
+        - font, msg, w, h : éléments nécessaires au rendu du message de connexion en attente.
+        """
+        self.screen.fill(BLACK)
+        if self.interface is not None:
+            self.interface.draw()
+        else:
+            font = pygame.font.SysFont("Consolas", 18, bold=True)
+            msg = font.render("Connecting to server...", True, (0, 180, 80))
+            w, h = self.screen.get_size()
+            self.screen.blit(msg, (w // 2 - msg.get_width() // 2, h // 2))
+
+        super().display()
+
+
+class MultiGame(DefaultGame):
+    """Gère l'état de jeu principal, la communication réseau et la synchronisation avec l'interface.
+
+    Variables d'instance principales :
+    - host, port, name : paramètres de connexion du client.
+    - client : instance de ClientNetwork utilisée pour envoyer et recevoir les messages.
+    - _game_thread : thread de fond qui traite les messages entrants.
+    - neighbors, all_players, connected_players : listes des joueurs visibles et connectés.
+    - resources, all_resources : ressources du joueur courant et des autres nœuds connus.
+    - interface : référence vers l'interface graphique associée au jeu.
+
+    Méthodes principales :
+    - start, close_connexion : gestion du cycle de vie réseau.
+    - _run, _handle_message : traitement des messages entrants.
+    - _build_adjacent_matrix, _build_user_data : construction des données utilisées par le graphe.
+    - _update_interface_resources, _sync_interface, _apply_initial_state : synchronisation avec l'interface.
+    - send, attack, request_state, ping : envoi de commandes au serveur.
+    - event, update, display : intégration avec la boucle PyGame.
+    """
+
+    def __init__(
+        self,
+        screen: pygame.Surface,
+        manager: BaseManager,
+        host: str = socket.gethostbyname(socket.gethostname()),
+        port: int = 5555,
+        name: str = "Materwan",
+    ):
+        """Initialise la vue de jeu, la connexion réseau et les structures internes.
+
+        Variables d'instance créées :
+        - host, port, name : paramètres de connexion du joueur.
+        - client : client réseau prêt à se connecter au serveur.
+        - _game_thread : thread de fond dédié au traitement des messages.
+        - neighbors, all_players, connected_players : listes d'information réseau.
+        - resources, all_resources : état des ressources du joueur et des autres nœuds.
+        - interface : interface graphique encore non initialisée.
+        """
+        super().__init__(screen, manager, name)
+
+        self.host = host
+        self.port = port
+
+        self.client: ClientNetwork = None
+        self._game_thread: threading.Thread = None
+        self._input_thread: threading.Thread = None
+        self._stdin_thread = threading.Thread(target=self._read_stdin, daemon=True)
+
+        self._stdin_queue: Queue[str] = Queue()
+
+        self.logs: List[Dict[str, Any]] = []
+
+        self._stdin_thread.start()
+
+    def _initialize(self):
+        self.client = ClientNetwork(self.host, self.port, self.name)
+        self._game_thread = threading.Thread(target=self._run, daemon=True)
+        self._input_thread = threading.Thread(target=self._input_loop, daemon=True)
+
+        self._stdin_queue: Queue[str] = Queue()
+        self.user_state = UserStates(self.name)
+
+        self.interface: Interface = Interface(self.screen, self.user_state, self.name)
+
+        self.logs: List[Dict[str, Any]] = []
+
+    # ------------------------------------------------------------------
+    # Cycle de vie
+    # ------------------------------------------------------------------
+
+    def start(self):
+        """Démarre la connexion au serveur et lance la boucle de jeu.
+
+        Variables locales utilisées :
+        - deadline : temporisation de 3 secondes pour attendre la connexion.
+        """
+        self._initialize()
+        self.client.start()
+
+        deadline = time.time() + 3.0
+        while not self.client.connected and time.time() < deadline:
+            time.sleep(0.05)
+
+        if self.client.connected:
+            # self._apply_initial_state(self.client.initial_state)
+            if not self._game_thread.is_alive():
+                self._game_thread.start()
+            if not self._input_thread.is_alive():
+                self._input_thread.start()
+            self.client.send({"type": "get_state"})
+        else:
+            print("[Game] Failed to connect to server")
+
+    def close_connexion(self):
+        """Ferme proprement la connexion réseau active.
+
+        Aucune variable locale majeure n'est utilisée.
+        """
+        if self.client:
+            self.client.close()
+
+    def _run(self):
+        """Lit en continu les messages entrants et les transmet au gestionnaire.
+
+        Variables locales utilisées :
+        - data : message réseau extrait de la file d'attente.
+        """
+        while self.client.connected or not self.client.incoming_queue.empty():
+            try:
+                data = self.client.incoming_queue.get(timeout=0.05)
+                self._pending_messages.put(data)
+            except Empty:
+                pass
+
+    def _read_stdin(self):
+        """Tourne dans un thread daemon dédié : peut rester bloqué sur input()
+        sans jamais empêcher le programme de se terminer."""
+        while True:
+            try:
+                line = input()
+            except (EOFError, KeyboardInterrupt):
+                self._stdin_queue.put(None)  # signal de fin
+                return
+            self._stdin_queue.put(line)
+
+    def _input_loop(self):
+        """Boucle console pour saisir des commandes de jeu pendant l'exécution.
+
+        Commandes prises en charge :
+        - help : affiche l'aide.
+        - ping : envoie un ping au serveur.
+        - state : demande une mise à jour de l'état.
+        - attack <cible> : attaque un joueur.
+        - get neighbors|players|connected|resources : affiche les données locales.
+        - quit|exit|close : ferme la connexion et arrête le jeu.
+        """
+
+        def _handle_help(command: List[str]):
+            print(
+                "\nCommands: help | ping | state | attack <target> | get <neighbors|players|connected|resources> | quit"
+            )
+
+        def _handle_ping(command: List[str]):
+            self.ping()
+            print("\nPing sent to server.")
+
+        def _handle_state(command: List[str]):
+            self.request_state()
+            print("\nState request sent.")
+
+        def _handle_attack(command: List[str]):
+            if len(command) > 1:
+                target = command[1]
+                self.attack(target)
+                print(f"\nAttack request sent to '{target}'.")
+            else:
+                print("\nUsage: attack <target>")
+
+        def _handle_get(command: List[str]):
+            if len(command) > 1:
+                option = command[1]
+                if option == "neighbors":
+                    print(f"\nNeighbors: {self.neighbors}")
+                elif option in ("players", "all_players"):
+                    print(f"\nAll players: {self.all_players}")
+                elif option == "connected":
+                    print(f"\nConnected players: {self.connected_players}")
+                elif option == "resources":
+                    print(f"\nMy resources: {self.resources}")
+                    print(f"All resources: {self.all_resources}")
+                elif option == "graph":
+                    self.user_state.display_matrix()
+                else:
+                    print("\nUsage: get neighbors | players | connected | resources")
+            else:
+                print("\nUsage: get neighbors | players | connected | resources")
+
+        def _handle_log(command: List[str]):
+            number = 0
+            tag = ""
+            for arg in command[1:]:
+                if arg.isdigit():
+                    number = int(arg)
+                else:
+                    tag = arg
+            if number != 0:
+                print()
+                for message in self.logs[-int(number) :]:
+                    print(format_log(message, tag))
+            else:
+                print("\nUsage: log [option] [n] (n >= 1)")
+
+        def _handle_exec(command: List[str]):
+            if len(command) > 1:
+                code_str = " ".join(command[1:])
+                try:
+                    # Contexte local avec accès à `self`
+                    local_vars = {"self": self}
+                    print()
+                    exec(code_str, globals(), local_vars)
+                except Exception as e:
+                    print(f"\n[Error] {type(e).__name__}: {e}")
+                    print("\n[Traceback]")
+                    traceback.print_exc()
+            else:
+                print("\nUsage: exec <python code>")
+
+        def _handle_quit(command: List[str]):
+            self.close_connexion()
+            self.manager.running = False
+            print("\nClosing game.")
+
+        commands: Dict[str, Callable[[List[str]], None]] = {
+            "help": _handle_help,
+            "ping": _handle_ping,
+            "state": _handle_state,
+            "attack": _handle_attack,
+            "get": _handle_get,
+            "log": _handle_log,
+            "exec": _handle_exec,
+            "quit": _handle_quit,
+        }
+
+        while self.manager.running and self.client.connected:
+
+            try:
+                line = self._stdin_queue.get(timeout=0.1)
+            except Empty:
+                continue
+
+            if line:
+                ask = line.strip().split(" ")
+                used = False
+                for command in commands:
+                    if ask[0] == command:
+                        used = True
+                        commands[command](ask)
+                        break
+                if not used:
+                    print("Unknown command. Try 'help'.")
+
     def _apply_initial_state(self, state: Dict[str, Any]):
         """Applique l'état initial fourni par le serveur à l'instance locale.
 
@@ -489,55 +554,51 @@ class Game(DefaultState):
         """
         self.send({"type": "ping"})
 
-    # ------------------------------------------------------------------
-    # Boucle PyGame
-    # ------------------------------------------------------------------
 
-    def event(self, events: List[pygame.event.Event]):
-        """Traite les événements PyGame et les routes vers les composants concernés.
+class SoloGame(DefaultGame):
 
-        Paramètre utilisé :
-        - events : liste des événements pygame à analyser.
-        """
-        super().event(events)
-        for event in events:
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_p:
-                    self.ping()
-                if event.key == pygame.K_r:
-                    self.request_state()
+    def __init__(self, screen, manager, name="Materwan"):
+        super().__init__(screen, manager, name)
 
-        if self.interface:
-            self.interface.event(events)
+        self.running = True
 
-    def update(self):
-        """Met à jour l'état courant du jeu.
+        self.game_logic = GameLogic(self.name)
+        self._game_thread: threading.Thread = None
 
-        Aucune variable locale majeure n'est utilisée.
-        """
-        super().update()
-        while not self._pending_messages.empty():
-            data = self._pending_messages.get()
-            self._handle_message(data)
-        if self.interface:
-            self.interface.update()
+        self._pending_messages_game: Queue[Dict[str, Any]] = Queue()
 
-        if not self.client.connected:
-            self.manager.change_state("Principal_Menu")
+    def send(self, user_name: str, data: Dict[str, Any]):
+        """Place les données dans la queue de traitement client."""
 
-    def display(self):
-        """Rafraîchit l'affichage du jeu et de la vue graphique.
+        if user_name == self.name:
+
+            self._pending_messages.put(data)
+
+    def broadcast(self, data: Dict[str, Any]):
+        """Place les données dans la queue de traitement client."""
+
+        self._pending_messages.put(data)
+
+    def start(self):
+
+        self.game_logic.initialize(self.send, self.broadcast, 5)
+
+        self._game_thread = threading.Thread(target=self._run, daemon=True)
+        self._game_thread.start()
+
+    def close(self):
+
+        self.running = False
+
+    def _run(self):
+        """Boucle principale de réception des messages réseau entrants.
 
         Variables locales utilisées :
-        - font, msg, w, h : éléments nécessaires au rendu du message de connexion en attente.
+        - sender, data : expéditeur et contenu du message lu depuis la file d'attente.
         """
-        self.screen.fill(BLACK)
-        if self.interface is not None:
-            self.interface.draw()
-        else:
-            font = pygame.font.SysFont("Consolas", 18, bold=True)
-            msg = font.render("Connecting to server...", True, (0, 180, 80))
-            w, h = self.screen.get_size()
-            self.screen.blit(msg, (w // 2 - msg.get_width() // 2, h // 2))
-
-        super().display()
+        while self.running:
+            try:
+                sender, data = self._pending_messages_game.get(timeout=0.05)
+                self.game_logic._handle_message(sender, data)
+            except Exception:
+                pass

@@ -4,7 +4,7 @@ import random
 import time
 import traceback
 from queue import Empty, Queue
-from typing import List, Dict, Any, Callable
+from typing import List, Tuple, Dict, Any, Callable
 
 import pygame
 
@@ -13,6 +13,8 @@ from server_utils import *
 from interface import Interface
 
 random.seed(42)
+
+from pygame._sdl2.video import Window
 
 
 class Server:
@@ -53,229 +55,24 @@ class Server:
           joueur) que le serveur accepte de révéler à ce joueur. 1 = voisins
           directs uniquement (comportement historique).
         """
-        self.user_states = UserStates()
+        self.game_logic = GameLogic()
 
         self.visual = visual
-        self.visibility_depth = visibility_depth
 
         self.running = True
 
         self.server = ServerNetwork(
             host,
             port,
-            on_guest_connect=self._on_connect,
-            on_guest_disconnect=self._on_disconnect,
+            on_guest_connect=self.game_logic._on_connect,
+            on_guest_disconnect=self.game_logic._on_disconnect,
         )
         self._server_thread = threading.Thread(target=self._run, daemon=True)
         self._stdin_thread = threading.Thread(target=self._read_stdin, daemon=True)
 
         self._stdin_queue: Queue[str] = Queue()
 
-        self.logs: List[Dict[str, Any]] = []
-
         self._stdin_thread.start()
-
-    # ------------------------------------------------------------------
-    # Callbacks réseau
-    # ------------------------------------------------------------------
-
-    def _on_connect(self, data: dict) -> dict:
-        """Gère la connexion d'un nouvel utilisateur au serveur.
-
-        Variables locales utilisées :
-        - response : sous-graphe (jusqu'à self.visibility_depth) renvoyé après
-          l'ajout de l'utilisateur au graphe.
-        - name : nom du joueur venant de se connecter.
-        """
-        new_user_name = data.get("name", "?")
-        generate_connexion(self.user_states, new_user_name)
-        response = {"type": "handshake"}
-
-        print(
-            f"[Game] '{new_user_name}' joined — neighbors: {self.user_states.get_neighbors(new_user_name)}"
-        )
-
-        new_user_neighbors = self.user_states.get_neighbors(new_user_name)
-        distances_to_new_user = self.user_states.get_distances(new_user_name)
-        new_user_resources = self.user_states.get_resources(new_user_name)
-
-        # print(distances_to_new_user)
-
-        for curr_name, distance in distances_to_new_user.items():
-
-            curr_visibility = self.user_states._get_visibility_depth(curr_name)
-
-            if distance < curr_visibility:
-
-                self.server.send_to(
-                    curr_name,
-                    {
-                        "type": "new_user",
-                        "name": new_user_name,
-                        "neighbors": new_user_neighbors,
-                        "resources": new_user_resources,
-                    },
-                )
-
-            elif distance == curr_visibility:
-
-                self.server.send_to(
-                    curr_name,
-                    {
-                        "type": "new_user",
-                        "name": new_user_name,
-                        "neighbors": [
-                            t_name
-                            for t_name in self.user_states.get_neighbors(curr_name)
-                            if self.user_states.get_distance(new_user_name, t_name)
-                            < curr_visibility
-                        ],
-                        "resources": new_user_resources,
-                    },
-                )
-
-        return response
-
-    def _on_disconnect(self, name: str):
-        """Gère la déconnexion d'un joueur et annonce son départ aux autres clients.
-
-        Paramètre utilisé :
-        - name : nom du joueur qui vient de quitter.
-        """
-        print(f"[Game] '{name}' left the game")
-        self.user_states.remove_user(name)
-
-        self.server.broadcast(
-            {
-                "type": "player_left",
-                "name": name,
-            }
-        )
-
-    # ------------------------------------------------------------------
-    # Boucle de jeu
-    # ------------------------------------------------------------------
-
-    def _handle_message(self, sender: str, data: dict):
-        """Traite les messages envoyés par un client et répond en conséquence.
-
-        Variables locales utilisées :
-        - msg_type : type de message reçu pour choisir le traitement.
-        - target : cible visée par une requête ou une attaque.
-        - response : réponse générée pour un ordre d'attaque.
-        - timestamp, latency : données de ping/pong.
-        """
-        msg_type = data.get("type")
-
-        if msg_type == "attack":
-            target = data.get("target")
-            response = self._resolve_attack(sender, target)
-            self.server.send_to(sender, response)
-
-        elif msg_type == "get_state":
-            response = self._build_player_state(sender)
-            self.server.send_to(sender, response)
-
-        elif msg_type == "get_node_resources":
-            target = data.get("target")
-            res = self.user_states.get_resources(target) if target else {}
-            response = {
-                "type": "node_resources",
-                "name": target,
-                "resources": res,
-            }
-            self.server.send_to(
-                sender,
-                response,
-            )
-
-        elif msg_type == "ping":
-            response = {"type": "pong"}
-            self.server.send_to(sender, response)
-
-        elif msg_type == "pong":
-            response = {}
-            timestamp = data.get("timestamp")
-            if isinstance(timestamp, (int, float)):
-                latency = (time.time() - timestamp) * 1000
-                print(f"[Server] Received pong from {sender} — RTT ≈ {latency:.1f} ms")
-            else:
-                print(f"[Server] Received pong from {sender}")
-
-        elif msg_type == "close":
-            response = {}
-            self._on_disconnect(sender)
-
-        else:
-            response = {"type": "echo", "received": data}
-            self.server.send_to(sender, response)
-
-        self.logs.append(
-            {
-                "sender": sender,
-                "time": int(time.time()),
-                "data": data,
-                "response": response,
-            }
-        )
-
-    def _resolve_attack(self, attacker: str, target: str) -> dict:
-        """Vérifie si une attaque est valide et prépare la réponse associée.
-
-        Variables locales utilisées :
-        - names : liste des noms d'utilisateurs connus.
-        - attacker_idx, target_idx : indices des joueurs dans la liste.
-        - are_neighbors : indique si l'attaquant et la cible sont voisins.
-        - result : réponse envoyée au client attaquant.
-        """
-        names = self.user_states.user_names
-        if target not in names:
-            return {
-                "type": "attack_result",
-                "success": False,
-                "reason": "unknown_target",
-            }
-
-        attacker_idx = names.index(attacker) if attacker in names else -1
-        target_idx = names.index(target)
-
-        are_neighbors = (
-            attacker_idx >= 0
-            and target_idx in self.user_states.adjacent_list[attacker_idx]
-        )
-
-        result = {"type": "attack_result", "target": target, "success": are_neighbors}
-
-        if are_neighbors:
-            self.server.send_to(target, {"type": "under_attack", "from": attacker})
-
-        return result
-
-    def _build_player_state(self, name: str) -> dict:
-        """Construit l'état complet envoyé à un joueur donné.
-
-        Variables locales utilisées :
-        - names : liste des joueurs connus du serveur.
-        - visible : sous-graphe visible pour ce joueur, jusqu'à
-          self.visibility_depth (voisins directs, voisins de voisins, etc.).
-        - neighbors : voisins directs réels du joueur (arêtes du graphe).
-        - all_resources : ressources de tous les nœuds visibles autour du joueur.
-        """
-        names = self.user_states.user_names
-        if name not in names:
-            return {
-                "type": "state",
-                "neighbors": [],
-                "resources": {},
-                "all_resources": {},
-            }
-
-        return {
-            "type": "state",
-            "users": self.user_states.get_all_data_depth(
-                name, self.user_states._get_visibility_depth(name)
-            ),
-        }
 
     def _run(self):
         """Boucle principale de réception des messages réseau entrants.
@@ -286,7 +83,7 @@ class Server:
         while self.running:
             try:
                 sender, data = self.server.incoming_queue.get(timeout=0.05)
-                self._handle_message(sender, data)
+                self.game_logic._handle_message(sender, data)
             except Exception:
                 pass
 
@@ -310,8 +107,7 @@ class Server:
         self.server.start()
         self._server_thread.start()
 
-        for _ in range(5):
-            self._on_connect({"name": f"User {len(self.user_states.user_names)}"})
+        self.game_logic.initialize(self.server.send_to, self.server.broadcast, 5)
 
         self._input_loop()
 
@@ -349,7 +145,7 @@ class Server:
         def _handle_get(command: List[str]):
             if len(command) > 1:
                 if command[1] == "graph":
-                    self.user_states.display_matrix()
+                    self.game_logic.user_states.display_matrix()
                 elif command[1] == "connected":
                     print(f"\nConnected: {self.server.connected_names()}")
                 else:
@@ -367,10 +163,10 @@ class Server:
             if len(command) > 1:
                 payload = {"type": "ping", "timestamp": time.time()}
                 if command[1] in self.server.connected_names():
-                    self.server.send_to(command[1], payload)
+                    self.game_logic.send(command[1], payload)
                     print(f"\nPing sent to {command[1]}")
                 elif command[1] == "all":
-                    self.server.broadcast(payload)
+                    self.game_logic.broadcast(payload)
                     print("\nPing sent to all connected clients")
                 else:
                     print(f"\n'{command[1]}' is not a connected client")
@@ -381,7 +177,7 @@ class Server:
             if self.visual.running:
                 print("\nVisual interface already running.")
             else:
-                self.visual.trigger(self.user_states)
+                self.visual.trigger(self.game_logic.user_states)
 
         def _handle_exit(command: List[str]):
             if not self.visual.running:
@@ -399,28 +195,30 @@ class Server:
                     tag = arg
             if number != 0:
                 print()
-                for message in self.logs[-int(number) :]:
+                for message in self.game_logic.logs[-int(number) :]:
                     print(format_log(message, tag))
             else:
                 print("\nUsage: log [option] [n] (n >= 1)")
 
         def _handle_generate(command: List[str]):
-            self._on_connect({"name": f"User_{len(self.user_states.user_names)}"})
-
-        def _handle_depth(command: List[str]):
-            if len(command) > 1 and command[1].isdigit() and int(command[1]) >= 1:
-                self.visibility_depth = int(command[1])
-                print(f"\nVisibility depth set to {self.visibility_depth}.")
-            else:
-                print(f"\nCurrent visibility depth: {self.visibility_depth}")
-                print("Usage: depth <n> (n >= 1)")
+            number = 1
+            if len(command) > 1:
+                if command[1].isdigit():
+                    number = int(command[1])
+            for _ in range(number):
+                new_bot_name = f"User {len(self.game_logic.user_states.user_names)}"
+                self.game_logic._on_connect({"name": new_bot_name})
+                self.game_logic._bots.append(new_bot_name)
 
         def _handle_exec(command: List[str]):
             if len(command) > 1:
                 code_str = " ".join(command[1:])
                 try:
                     # Contexte local avec accès à `self`
-                    local_vars = {"self": self}
+                    local_vars = {
+                        "self": self,
+                        "user_states": self.game_logic.user_states,
+                    }
                     print()
                     exec(code_str, {"__builtins__": __builtins__}, local_vars)
                 except Exception as e:
@@ -439,7 +237,6 @@ class Server:
             "exit": _handle_exit,
             "log": _handle_log,
             "generate": _handle_generate,
-            "depth": _handle_depth,
             "exec": _handle_exec,
         }
 
@@ -481,6 +278,14 @@ class Visual:
         self.user_stats: UserStates | None = None
         self.interface: Interface | None = None
 
+        self.FULLSCREEN_SIZE: Tuple[int, int] = None
+        self.DEFAULTSCREENSIZE: Tuple[int, int] = None
+        self.WINDOW: Window = None
+
+        self.screen_size: Tuple[int, int] = None
+        self.last_screen_size: Tuple[int, int] = None
+        self.last_screen_pos: Tuple[int, int] = None
+
     def trigger(self, user_stats: UserStates):
 
         self.running = False
@@ -510,11 +315,58 @@ class Visual:
             else:
                 self.interface.graph.user_states = self.user_stats
                 self.interface.graph.users = self.user_stats.user_names
-                self.interface.graph.user_states = self.user_stats.get_adjacent_matrix()
+                self.interface.graph.adjacent_list = (
+                    self.user_stats.get_adjacent_matrix()
+                )
 
         self.interface.user_data = {
             name: {"CPU": 10, "RAM": 10} for name in self.user_stats.user_names
         }
+
+    def resize_screen(self, new_size: Tuple[int, int] | List[int] | None = None):
+
+        if new_size is None:
+            new_size = self.FULLSCREEN_SIZE
+
+        def change_screen(new_size: Tuple[int, int] | List[int]):
+            self.screen = pygame.display.set_mode(
+                new_size,
+                (
+                    pygame.NOFRAME | pygame.RESIZABLE
+                    if new_size == self.FULLSCREEN_SIZE
+                    else pygame.RESIZABLE
+                ),
+            )
+
+        last_screen_size = self.screen.get_size()
+        last_screen_pos = self.WINDOW.position
+
+        if new_size == self.FULLSCREEN_SIZE:
+
+            if self.screen_size != self.FULLSCREEN_SIZE:
+                change_screen(self.FULLSCREEN_SIZE)
+                self.WINDOW.position = (0, 0)
+                self.screen_size = self.FULLSCREEN_SIZE
+            else:
+                change_screen(self.last_screen_size)
+                self.WINDOW.position = self.last_screen_pos
+                self.screen_size = self.DEFAULTSCREENSIZE
+
+        else:
+            # window_y = WINDOW.position[1]
+            # size = new_size
+
+            if new_size[0] < self.DEFAULTSCREENSIZE[0]:
+                new_size = (self.DEFAULTSCREENSIZE[0], new_size[1])
+            if new_size[1] < self.DEFAULTSCREENSIZE[1]:
+                new_size = (new_size[0], self.DEFAULTSCREENSIZE[1])
+
+            change_screen(new_size)
+            # WINDOW.position = (WINDOW.position[0], window_y + size[1] - new_size[1])
+            self.screen_size = new_size
+
+        self.last_screen_size = last_screen_size
+        self.last_screen_pos = last_screen_pos
 
     def event(self):
         """Gére les évenements : interactions du joueur avec l'interface."""
@@ -525,6 +377,13 @@ class Visual:
 
             if event.type == pygame.QUIT:
                 self.running = False
+
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_F11:
+                    self.resize_screen()
+
+            if event.type == pygame.VIDEORESIZE:
+                self.resize_screen(event.size)
 
         if self.interface is not None:
             self.interface.event(events)
@@ -555,7 +414,27 @@ class Visual:
         pygame.display.init()
         pygame.font.init()
 
-        self.screen = pygame.display.set_mode((920, 580))
+        self.FULLSCREEN_SIZE = (
+            pygame.display.Info().current_w,
+            pygame.display.Info().current_h,
+        )
+        self.DEFAULTSCREENSIZE = (
+            self.FULLSCREEN_SIZE[0] // 2,
+            self.FULLSCREEN_SIZE[1] // 2,
+        )
+
+        self.screen = pygame.display.set_mode(
+            self.DEFAULTSCREENSIZE, flags=pygame.RESIZABLE
+        )
+
+        self.screen_size = self.DEFAULTSCREENSIZE
+        self.last_screen_size = self.DEFAULTSCREENSIZE
+        self.last_screen_pos = (
+            (self.FULLSCREEN_SIZE[0] - self.DEFAULTSCREENSIZE[0]) // 2,
+            (self.FULLSCREEN_SIZE[1] - self.DEFAULTSCREENSIZE[1]) // 2,
+        )
+
+        self.WINDOW = Window.from_display_module()
 
         self.interface = Interface(self.screen, self.user_stats)
 
@@ -603,6 +482,13 @@ if __name__ == "__main__":
         server_thread.start()
         visual.run(server_thread)
     except KeyboardInterrupt:
+        server.close()
+        while server.server._tcp_thread.is_alive():
+            time.sleep(0.05)
+        print("\n[Server] Server shutdown...")
+    except Exception as e:
+        print(f"\n[Server] Crash :{e}")
+        traceback.print_exc()
         server.close()
         while server.server._tcp_thread.is_alive():
             time.sleep(0.05)

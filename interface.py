@@ -26,6 +26,11 @@ GRID_COLOR = (40, 40, 40)
 LABEL_SELF_COLOR = (180, 255, 200)
 LABEL_OTHER_COLOR = (140, 200, 255)
 
+# -- Edge --
+
+EDGE_COLOR = WHITE
+EDGE_HOVER_COLOR = (255, 220, 60)
+
 FONT_NAME = "Consolas"
 
 
@@ -192,11 +197,17 @@ class Node:
 class Graph:
     """Représente le graphe complet et gère ses nœuds et ses liens."""
 
-    REPULSION = 10000.0  # répulsion nœud-nœud
-    SPRING_K = 0.02  # raideur du ressort (liens)
-    SPRING_LEN = 200.0  # longueur à vide du ressort
-    GRAVITY = 0.01  # attraction centrale
+    BASE_REPULSION = 10000.0  # répulsion nœud-nœud
+    BASE_SPRING_K = 0.02  # raideur du ressort (liens)
+    BASE_SPRING_LEN = 200.0  # longueur à vide du ressort
+    BASE_GRAVITY = 0.01  # attraction centrale
+    BASE_NODE_COUNT = 5  # nombre de nœuds pour lequel ces valeurs sont "justes"
+
     MIN_DIST = 1.0  # évite division par zéro
+
+    EDGE_HIDE_ZOOM_THRESHOLD = (
+        0.7  # en dessous de ce zoom, les liens non survolés sont masqués
+    )
 
     def __init__(
         self,
@@ -256,16 +267,41 @@ class Graph:
         for node in self.nodes:
             node._handle_event(events, offset, zoom)
 
+    def _effective_params(self) -> Tuple[float, float, float, float]:
+        """Calcule des paramètres physiques adaptés au nombre de nœuds actuel.
+
+        Plus il y a de nœuds, plus il faut :
+        - de répulsion et une plus grande longueur de ressort pour éviter
+          l'entassement au centre,
+        - une gravité plus faible pour laisser le graphe s'étaler,
+        - une raideur de ressort légèrement réduite pour éviter les
+          oscillations quand beaucoup de liens tirent en même temps.
+        """
+        n = max(len(self.nodes), 1)
+        ratio = n / self.BASE_NODE_COUNT
+
+        # La répulsion et la longueur de ressort croissent avec sqrt(n)
+        # (approx. la façon dont l'aire nécessaire croît avec le nombre de nœuds).
+        scale = math.sqrt(ratio)
+
+        repulsion = self.BASE_REPULSION * scale
+        spring_len = self.BASE_SPRING_LEN * scale
+        gravity = self.BASE_GRAVITY / scale
+        spring_k = self.BASE_SPRING_K / math.sqrt(scale)
+
+        return repulsion, spring_k, spring_len, gravity
+
     def update(self, offset: pygame.Vector2, zoom: float):
         """Met à jour la position des nœuds selon les forces de répulsion et d'attraction."""
 
         n = len(self.nodes)
+        repulsion, spring_k, spring_len, gravity = self._effective_params()
 
         for i in range(n):
             ni = self.nodes[i]
 
             # --- Force centrale (gravité vers l'origine) ---
-            ni.force -= ni.pos * self.GRAVITY
+            ni.force -= ni.pos * gravity
 
             for j in range(i + 1, n):
                 nj = self.nodes[j]
@@ -273,7 +309,7 @@ class Graph:
                 dist = max(delta.length(), self.MIN_DIST)
 
                 # --- Répulsion nœud-nœud (Coulomb) ---
-                rep_mag = self.REPULSION / (dist * dist)
+                rep_mag = repulsion / (dist * dist)
                 rep = delta.normalize() * rep_mag
                 ni.force += rep
                 nj.force -= rep
@@ -286,8 +322,8 @@ class Graph:
                 )
 
                 if connected:
-                    stretch = dist - self.SPRING_LEN
-                    spring_mag = self.SPRING_K * stretch
+                    stretch = dist - spring_len
+                    spring_mag = spring_k * stretch
                     spring = delta.normalize() * spring_mag
                     ni.force -= spring
                     nj.force += spring
@@ -298,13 +334,32 @@ class Graph:
     def draw(self, offset: pygame.Vector2, zoom: float):
         """Dessine les liens et les nœuds du graphe."""
 
+        show_all_edges = zoom >= self.EDGE_HIDE_ZOOM_THRESHOLD
+
         for id, row in enumerate(self.adjacent_list):
 
             for neighbor, connected in enumerate(row):
                 if connected and id != neighbor:
-                    start = world_to_screen(self.nodes[id].pos, offset, zoom)
-                    end = world_to_screen(self.nodes[neighbor].pos, offset, zoom)
-                    pygame.draw.line(self.screen, WHITE, start, end)
+                    node_a = self.nodes[id]
+                    node_b = self.nodes[neighbor]
+
+                    is_highlighted = (
+                        node_a.hover
+                        or node_b.hover
+                        or node_a.dragging
+                        or node_b.dragging
+                    )
+
+                    if not show_all_edges and not is_highlighted:
+                        continue
+
+                    start = world_to_screen(node_a.pos, offset, zoom)
+                    end = world_to_screen(node_b.pos, offset, zoom)
+
+                    color = EDGE_HOVER_COLOR if is_highlighted else EDGE_COLOR
+                    width = int(5 * zoom) if is_highlighted else int(1.5 * zoom)
+
+                    pygame.draw.line(self.screen, color, start, end, width)
 
         for node in self.nodes:
 
@@ -529,6 +584,13 @@ class WindowManager:
         title: str = "Node",
     ):
         """Ajoute une fenêtre d'information spécifique à un nœud."""
+        for window in self.windows:
+            if isinstance(window, NodeInfoWindow) and window.title == title:
+                if window.position.distance_to(position) < 10:
+                    self.windows.remove(window)
+                else:
+                    window.position = pygame.Vector2(position)
+                return
         self.windows.append(NodeInfoWindow(screen, position, data, title))
 
     @property
@@ -591,9 +653,8 @@ class Interface:
 
         self.screen = screen
 
-        self.user_data: Dict[str, Dict[str, int]] = {}
-
-        self._build_graph(user_states, self_name)
+        self.user_states = user_states
+        self._build_graph(self.user_states, self_name)
         self.windows_manager = WindowManager(self.screen)
 
         self.zoom: float = 1.0
@@ -634,7 +695,7 @@ class Interface:
 
     def get_user_info(self, user_name: str):
         """Retourne les informations d'un utilisateur depuis les données de l'interface."""
-        return self.user_data[user_name]
+        return self.user_states.get_resources(user_name)
 
     def sync(self):
         """Met à jour l'interface existante en place, sans la reconstruire.
@@ -644,6 +705,8 @@ class Interface:
         fenêtres d'info des joueurs qui ont quitté la partie.
         """
         self.graph.sync()
+        for node in self.graph.nodes:
+            node.on_click = self._on_node_click
         # self.windows_manager.remove_windows_for(removed)
 
     def event(self, events: List[pygame.event.Event]):
