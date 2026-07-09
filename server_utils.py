@@ -26,8 +26,6 @@ def generate_random_users(user_state: UserStates, num_users: int):
 
 if __name__ == "__main__":
 
-    random.seed(42)
-
     adjacent_list = UserStates()
     generate_random_users(adjacent_list, 5)
     print(adjacent_list.adjacent_list)

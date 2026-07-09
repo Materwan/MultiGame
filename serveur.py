@@ -1,6 +1,5 @@
 import threading
 import socket
-import random
 import time
 import traceback
 from queue import Empty, Queue
@@ -11,8 +10,6 @@ import pygame
 from network import ServerNetwork
 from server_utils import *
 from interface import Interface
-
-random.seed(42)
 
 from pygame._sdl2.video import Window
 
@@ -41,7 +38,6 @@ class Server:
         host: str,
         port: int,
         visual: "Visual",
-        visibility_depth: int = 1,
     ):
         """Initialise le serveur, la structure du graphe et la communication réseau.
 
@@ -474,7 +470,7 @@ if __name__ == "__main__":
 
     visual = Visual()
 
-    server = Server(host, port, visual, 2)
+    server = Server(host, port, visual)
 
     server_thread = threading.Thread(target=server.start)
 

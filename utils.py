@@ -241,6 +241,7 @@ class UserStates:
 
 
 def generate_connexion(user_state: UserStates, new_user_name: str):
+    random.seed(42)
     possible = user_state.get_disponible_neighbors_index()
     nb_connections = min(random.randint(2, 3), len(possible))
     neighbors_index = random.sample(possible, nb_connections)
