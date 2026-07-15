@@ -9,7 +9,7 @@ import pygame
 
 from network import ServerNetwork
 from server_utils import *
-from interface import Interface
+from UI.interface import Interface
 
 from pygame._sdl2.video import Window
 

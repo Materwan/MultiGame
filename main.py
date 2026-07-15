@@ -103,7 +103,7 @@ class Manager(BaseManager):
             self.state.update()
             self.state.display()
 
-            self.clock.tick(30)
+            self.clock.tick(60)
 
         self.states["Solo_Game"].close_connexion()
         self.states["Multi_Game"].close_connexion()

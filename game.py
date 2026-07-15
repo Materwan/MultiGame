@@ -9,7 +9,7 @@ import pygame
 
 from client_utils import *
 from network import ClientNetwork
-from interface import Interface
+from UI.interface import Interface
 
 
 class DefaultGame(DefaultState):
@@ -252,7 +252,7 @@ class DefaultGame(DefaultState):
         """
         self.screen.fill(BLACK)
         if self.interface is not None:
-            self.interface.draw()
+            self.interface.draw(self.manager.clock)
         else:
             font = pygame.font.SysFont("Consolas", 18, bold=True)
             msg = font.render("Connecting to server...", True, (0, 180, 80))
