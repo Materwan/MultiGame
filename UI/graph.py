@@ -194,8 +194,8 @@ class Graph(DefaultUIElt):
 
     BASE_REPULSION = 10000.0  # répulsion nœud-nœud
     BASE_SPRING_K = 0.02  # raideur du ressort (liens)
-    BASE_SPRING_LEN = 200.0  # longueur à vide du ressort
-    BASE_GRAVITY = 0.01  # attraction centrale
+    BASE_SPRING_LEN = 150.0  # longueur à vide du ressort
+    BASE_GRAVITY = 0.0  # attraction centrale
     BASE_NODE_COUNT = 5  # nombre de nœuds pour lequel ces valeurs sont "justes"
 
     MIN_DIST = 1.0  # évite division par zéro
