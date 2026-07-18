@@ -30,7 +30,20 @@ class DefaultGame(DefaultState):
 
         self.logs: List[Dict[str, Any]] = []
 
-        self.interface: Interface = Interface(self.screen, self.user_state, self.name)
+        self.interface: Interface = Interface(
+            self.screen, self, self.user_state, self.name
+        )
+
+    @abstractmethod
+    def send(self, data: Dict[str, Any]):
+        """Méthode pour envoyer des données au serveur."""
+
+    # ------------------------------------------------------------------
+    # Actions client
+    # ------------------------------------------------------------------
+
+    def attack(self, player_name: str):
+        self.send({"type": "attack", "player_name": player_name})
 
     # ------------------------------------------------------------------
     # Boucle de traitement des messages client
@@ -70,6 +83,7 @@ class DefaultGame(DefaultState):
                 data.get("name"),
                 data.get("neighbors"),
                 data.get("resources"),
+                data.get("level"),
             )
             self._sync_interface()
             # self.user_state.display_matrix()
@@ -104,6 +118,17 @@ class DefaultGame(DefaultState):
             response = {"type": "pong", "timestamp": time.time()}
             self.send(response)
 
+        elif msg_type == "attack_info":
+            response = {}
+            mini_game_name = data.get("mini_game_name")
+            mini_game_info = data.get("mini_game")
+            if mini_game_name and mini_game_info:
+                mini_game = MINI_GAMES_NAMES[mini_game_name].from_json(
+                    mini_game_info, DEFAULT_GATE_LIBRARY
+                )
+            self.interface.sync_mini_game(mini_game)
+            print("Mini game synced")
+
         else:
             print(f"[Game] Unknown message type '{msg_type}': {data}")
 
@@ -118,13 +143,14 @@ class DefaultGame(DefaultState):
     def _apply_user_states(self, data: Dict[str, Dict[str, Any]]):
         user_data = data.get("users", {})
         for user in user_data.keys():
-            self.user_state.add_user(user, [], DEFAULT_RESOURCES)
+            self.user_state.add_user(user, [], DEFAULT_RESOURCES, DEFAULT_LEVEL)
 
         for user, data in user_data.items():
             self.user_state.update_user(
                 user,
                 data.get("neighbors", []),
                 data.get("resources", DEFAULT_RESOURCES),
+                data.get("level", DEFAULT_LEVEL),
             )
 
         self.interface.sync()
@@ -324,7 +350,9 @@ class MultiGame(DefaultGame):
         self._stdin_queue: Queue[str] = Queue()
         self.user_state = UserStates(self.name)
 
-        self.interface: Interface = Interface(self.screen, self.user_state, self.name)
+        self.interface: Interface = Interface(
+            self.screen, self, self.user_state, self.name
+        )
 
         self.logs: List[Dict[str, Any]] = []
 
@@ -459,7 +487,10 @@ class MultiGame(DefaultGame):
                 code_str = " ".join(command[1:])
                 try:
                     # Contexte local avec accès à `self`
-                    local_vars = {"self": self}
+                    local_vars = {
+                        "self": self,
+                        "user_states": self.user_state,
+                    }
                     print()
                     exec(code_str, globals(), local_vars)
                 except Exception as e:
@@ -518,7 +549,7 @@ class MultiGame(DefaultGame):
 
         self._sync_interface()
         print(f"[Game] Initial neighbors: {self.user_state.get_neighbors(self.name)}")
-        print(f"[Game] Initial resources: {self.user_state.get_ressources(self.name)}")
+        print(f"[Game] Initial resources: {self.user_state.get_resources(self.name)}")
 
     # ------------------------------------------------------------------
     # Envoi vers le serveur

@@ -43,6 +43,7 @@ class Window(DefaultUIElt):
     def __init__(
         self,
         screen: pygame.Surface,
+        game,
         position: List[int] | Tuple[int, int],
         size: List[int] | Tuple[int, int],
         close_fn: Callable = None,
@@ -52,6 +53,7 @@ class Window(DefaultUIElt):
         """Initialise la fenêtre avec sa position, sa taille et son titre."""
 
         self.screen = screen
+        self.game = game
         self.close_fn = close_fn
 
         # -- Window (world coordinates) --
@@ -296,23 +298,26 @@ class NodeInfoWindow(Window):
 
     def __init__(
         self,
-        screen,
-        position,
+        screen: pygame.Surface,
+        game,
+        position: List[int] | Tuple[int, int],
+        player_name: str,
         data: Dict[str, Any],
         close_fn: Callable,
         attack_fn: Callable,
-        title: str = "Empty",
     ):
         """Initialise la fenêtre avec les informations à afficher."""
         super().__init__(
             screen,
+            game,
             position,
             (200, 300),
             close_fn,
             "> User Info",
-            title,
+            player_name,
         )
 
+        self.player_name = player_name
         self.data = data
 
         self._button_offsets.append(pygame.Vector2(int(self.BORDER_GAP * 1.5), 100))
@@ -327,7 +332,7 @@ class NodeInfoWindow(Window):
                 "Test",
                 12,
                 click_fn=attack_fn,
-                click_args=(self.position + pygame.Vector2(20, 20), title),
+                click_args=(self.position + pygame.Vector2(20, 20), self.player_name),
             )
         )
 
@@ -356,8 +361,24 @@ class NodeInfoWindow(Window):
 
 class AttackWindow(Window):
 
-    def __init__(self, screen, position, size, close_fn, title="Window"):
-        super().__init__(screen, position, size, close_fn, "> Attack", title)
+    def __init__(
+        self,
+        screen: pygame.Surface,
+        game,
+        player_name: str,
+        position: List[int] | Tuple[int, int],
+        size: List[int] | Tuple[int, int],
+        close_fn: Callable,
+    ):
+        super().__init__(
+            screen, game, position, size, close_fn, "> Attack", player_name
+        )
+
+        self.player_name = player_name
+
+        self.game.attack(self.player_name)
+
+        self.mini_game = None
 
     def draw(self, offset, zoom):
         """Dessine la fenêtre puis affiche les données textuelles du nœud."""
@@ -370,10 +391,14 @@ class AttackWindow(Window):
         font_size = int(self.BASE_FONT_SIZE * zoom)
         _data_font = pygame.font.SysFont(UITheme.FONT_NAME, font_size)
 
-        self.screen.blit(
-            _data_font.render("Test", False, UITheme.GREEN),
-            text_pos,
-        )
+        if self.mini_game:
+            text: str = self.mini_game.render()
+            for line in text.split("\n"):
+                self.screen.blit(
+                    _data_font.render(line, False, UITheme.GREEN),
+                    text_pos,
+                )
+                text_pos = (text_pos[0], text_pos[1] + _data_font.get_linesize())
 
 
 class WindowManager(DefaultUIElt):
@@ -393,10 +418,11 @@ class WindowManager(DefaultUIElt):
         - remove_windows_for(List[str]): close windows associated with the given names.
         - draw(offset, zoom): draw all currently open windows."""
 
-    def __init__(self, screen: pygame.Surface):
+    def __init__(self, screen: pygame.Surface, game):
         """Initialise le gestionnaire avec la surface d'affichage associée."""
 
         self.screen = screen
+        self.game = game
 
         self.windows: List[Window] = []
 
@@ -404,6 +430,12 @@ class WindowManager(DefaultUIElt):
         """Close one specific window."""
         if window in self.windows:
             self.windows.remove(window)
+
+    def sync_mini_game(self, mini_game):
+        for window in reversed(self.windows):
+            if isinstance(window, AttackWindow):
+                window.mini_game = mini_game
+                break
 
     def _handle_event(
         self,
@@ -425,19 +457,18 @@ class WindowManager(DefaultUIElt):
         """Add standard window to the manager."""
 
         self.windows.append(
-            Window(self.screen, position, size, self.close_window, title)
+            Window(self.screen, self.game, position, size, self.close_window, title)
         )
 
     def add_node_info_window(
         self,
-        screen: pygame.Surface,
         position: List[int] | Tuple[int, int],
+        player_name: str,
         data: Dict[str, Any],
-        title: str = "Node",
     ):
         """Add a node infomation window to the manager."""
         for window in self.windows:
-            if isinstance(window, NodeInfoWindow) and window.title == title:
+            if isinstance(window, NodeInfoWindow) and window.player_name == player_name:
                 if window.position.distance_to(position) < 10:
                     self.windows.remove(window)
                 else:
@@ -445,17 +476,23 @@ class WindowManager(DefaultUIElt):
                 return
         self.windows.append(
             NodeInfoWindow(
-                screen, position, data, self.close_window, self.add_attack_window, title
+                self.screen,
+                self.game,
+                position,
+                player_name,
+                data,
+                self.close_window,
+                self.add_attack_window,
             )
         )
 
     def add_attack_window(
         self,
         position: List[int] | Tuple[int, int],
-        title: str = "Node",
+        player_name: str,
     ):
         for window in self.windows:
-            if isinstance(window, AttackWindow) and window.title == title:
+            if isinstance(window, AttackWindow) and window.player_name == player_name:
                 if window.position.distance_to(position) < 10:
                     self.windows.remove(window)
                 else:
@@ -463,7 +500,12 @@ class WindowManager(DefaultUIElt):
                 return
         self.windows.append(
             AttackWindow(
-                self.screen, position, (200, 200), self.close_window, title=title
+                self.screen,
+                self.game,
+                player_name,
+                position,
+                (200, 200),
+                self.close_window,
             )
         )
 
@@ -504,9 +546,7 @@ if __name__ == "__main__":
 
     wm = WindowManager(screen)
     wm.add_window((100, 100), (300, 200), "Test Window")
-    wm.add_node_info_window(
-        screen, (400, 300), {"CPU": 50, "RAM": 75}, title="Node Info"
-    )
+    wm.add_node_info_window((400, 300), {"CPU": 50, "RAM": 75}, title="Node Info")
 
     running = True
 

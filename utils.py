@@ -2,12 +2,18 @@ from typing import Any, Dict, List, Callable
 import random
 from datetime import datetime
 import time
+from mini_games.circuit_game import Circuit, GateLibrary
+
+MINI_GAMES_NAMES: Dict[str, type] = {"Circuit": Circuit}
+
+DEFAULT_GATE_LIBRARY = GateLibrary()
 
 DEFAULT_CPU = 10
 DEFAULT_RAM = 10
 DEFAULT_RESOURCES = {"CPU": DEFAULT_CPU, "RAM": DEFAULT_RAM}
-DEFAULT_DEPTH_VISIBILITY = 1
+DEFAULT_DEPTH_VISIBILITY = 2
 MAX_NEIGHBORS = 5
+DEFAULT_LEVEL = 1
 
 DEBUG = True
 
@@ -22,6 +28,7 @@ class UserStates:
         self.nb_connection: List[int] = []
         self.adjacent_list: List[List[int]] = []
         self.resources: List[Dict[str, Any]] = []
+        self.levels: List[int] = []
         self._depth_visibility: List[int] = []
 
     def get_neighbors(self, user_name: str | None = None) -> List[str]:
@@ -35,7 +42,7 @@ class UserStates:
         else:
             return []
 
-    def get_ressources(self, user_name: str | None = None) -> Dict[str, Any]:
+    def get_resources(self, user_name: str | None = None) -> Dict[str, Any]:
         """Renvoie les ressources d'un utilisateur, ou de lui-même si None."""
         if not user_name:
             user_name = self.self_name
@@ -45,9 +52,14 @@ class UserStates:
         else:
             return {}
 
-    def get_resources(self, user_name: str | None = None) -> Dict[str, Any]:
-        """Alias anglais de get_ressources pour compatibilité avec le reste du code."""
-        return self.get_ressources(user_name)
+    def get_level(self, user_name: str | None = None) -> int:
+        if not user_name:
+            user_name = self.self_name
+        if user_name in self.user_names:
+            user_index = self.user_names.index(user_name)
+            return self.levels[user_index]
+        else:
+            return {}
 
     def get_all_data_depth(
         self, user_name: str, depth: int = 1
@@ -142,7 +154,8 @@ class UserStates:
         user_name: str,
         neighbors: List[str],
         resources: Dict[str, Any],
-        depth_visibility: int | None = None,
+        level: int,
+        depth_visibility: int | None = DEFAULT_DEPTH_VISIBILITY,
     ):
         """Rajoute un utilisateur au réseau."""
         user_index = len(self.user_names)
@@ -153,6 +166,7 @@ class UserStates:
                 self.adjacent_list[index].append(user_index)
                 self.nb_connection[index] += 1
         self.resources.append(resources)
+        self.levels.append(level)
         self.nb_connection.append(len(neighbors))
         self._depth_visibility.append(depth_visibility)
 
@@ -161,10 +175,12 @@ class UserStates:
         user_names: List[str],
         neighbors: List[List[str]],
         resources: List[Dict[str, Any]],
+        levels: List[int],
     ):
         base_index = len(self.user_names)
         self.user_names.extend(user_names)
         self.resources.extend(resources)
+        self.levels.extend(levels)
         self.adjacent_list.extend([[] for _ in range(len(user_names))])
 
         for index, user_neighbors in enumerate(neighbors):
@@ -182,7 +198,11 @@ class UserStates:
                         self.adjacent_list[neighbor_index].append(user_index)
 
     def update_user(
-        self, user_name: str, neighbors: List[str], resources: Dict[str, Any]
+        self,
+        user_name: str,
+        neighbors: List[str],
+        resources: Dict[str, Any],
+        level: int,
     ):
         """Met à jour un utilisateur du réseau."""
         user_index = self.user_names.index(user_name)
@@ -195,6 +215,7 @@ class UserStates:
                 elif user_index in self.adjacent_list[index]:
                     self.adjacent_list[index].remove(user_index)
         self.resources[user_index] = resources
+        self.levels[index] = level
 
     def remove_user(self, user_name: str):
         """Supprime un utilisateur du réseau."""
@@ -205,6 +226,7 @@ class UserStates:
                     self.adjacent_list[index].remove(user_index)
                     self.nb_connection[index] -= 1
 
+            self.levels.pop(user_index)
             self.user_names.pop(user_index)
             self.adjacent_list.pop(user_index)
             self.nb_connection.pop(user_index)
@@ -251,7 +273,7 @@ def generate_connexion(user_state: UserStates, new_user_name: str):
         new_user_name,
         [user_state.user_names[index] for index in neighbors_index],
         {"CPU": DEFAULT_CPU, "RAM": DEFAULT_RAM},
-        2,
+        1,
     )
 
 
@@ -270,6 +292,8 @@ class GameLogic:
 
         self.logs: List[Dict[str, Any]] = []
         self._bots: List[str] = []
+
+        self._attack: List[Dict[str, Any]] = []
 
     def initialize(
         self,
@@ -304,6 +328,7 @@ class GameLogic:
         )
 
         new_user_resources = self.user_states.get_resources(new_user_name)
+        new_user_level = self.user_states.get_level(new_user_name)
 
         # print(pprint.pformat(list(distances_to_new_user.items())))
 
@@ -332,6 +357,7 @@ class GameLogic:
                             if t_name in curr_visible_after and t_name != new_user_name
                         ],
                         "resources": new_user_resources,
+                        "level": new_user_level,
                     }
 
                     self.send(to_send, info)
@@ -380,6 +406,24 @@ class GameLogic:
             ),
         }
 
+    def _start_attck(self, attacker: str, attacked: str):
+
+        mini_game = Circuit.generate_random(1, DEFAULT_GATE_LIBRARY)
+        self._attack.append(
+            {
+                "attacker": attacker,
+                "attacked": attacked,
+                "mini_game_name": "Circuit",
+                "mini_game": mini_game,
+            }
+        )
+        print(mini_game.render())
+        return {
+            "type": "attack_info",
+            "mini_game_name": "Circuit",
+            "mini_game": mini_game.to_json(),
+        }
+
     def _handle_message(self, sender: str, data: dict):
         """Traite les messages envoyés par un client et répond en conséquence.
 
@@ -421,6 +465,14 @@ class GameLogic:
         elif msg_type == "close":
             response = {}
             self._on_disconnect(sender)
+
+        elif msg_type == "attack":
+            attacker = sender
+            attacked = data.get("player_name", None)
+            if attacked is None:
+                pass
+            response = self._start_attck(attacker, attacked)
+            self.send(attacker, response)
 
         else:
             response = {"type": "echo", "received": data}

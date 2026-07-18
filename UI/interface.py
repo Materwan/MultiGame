@@ -99,15 +99,17 @@ class Interface:
     def __init__(
         self,
         screen: pygame.Surface,
+        game,
         user_states: UserStates,
         self_name: str | None = None,
     ):
 
         self.screen = screen
+        self.game = game
 
         self.user_states = user_states
         self._build_graph(self.user_states, self_name)
-        self.windows_manager = WindowManager(self.screen)
+        self.windows_manager = WindowManager(self.screen, self.game)
         self.task_bar = TaskBar(self.screen)
 
         self.zoom: float = 1.0
@@ -142,13 +144,14 @@ class Interface:
         win_x = node.pos.x + 20
         win_y = node.pos.y + 20
 
-        self.windows_manager.add_node_info_window(
-            self.screen, (win_x, win_y), data, title=node.name
-        )
+        self.windows_manager.add_node_info_window((win_x, win_y), node.name, data)
 
     def get_user_info(self, user_name: str):
         """Retourne les informations d'un utilisateur depuis les données de l'interface."""
         return self.user_states.get_resources(user_name)
+
+    def sync_mini_game(self, mini_game):
+        self.windows_manager.sync_mini_game(mini_game)
 
     def sync(self):
         """Met à jour l'interface existante en place, sans la reconstruire.
